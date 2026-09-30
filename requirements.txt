@@ -1,0 +1,12 @@
+streamlit
+streamlit-authenticator
+bcrypt
+email-validator
+pandas
+plotly
+pydantic
+python-dotenv
+anthropic
+pypdf
+pymupdf
+reportlab
