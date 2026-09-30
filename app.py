@@ -4,13 +4,9 @@ Pure Streamlit frontend with direct SQLite & bcrypt authentication.
 Includes Landing page, Authentication, and Report Submission & AI Review pipeline.
 """
 import streamlit as st
-import streamlit_authenticator as stauth
 import pandas as pd
-import db
-import extract
-import review
-import report
-from models import UserRole, ReviewResult
+import services
+from models import UserRole, ReviewResult, Issue
 from landing import render_landing_page
 
 # Page configuration
@@ -21,20 +17,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 1. Initialize SQLite database & default demo reviewer
-db.init_db()
+# 1. Initialize SQLite database schema
+services.init_database()
 
-# 2. Load latest credentials from SQLite
-credentials = db.get_authenticator_credentials()
-
-# 3. Setup Streamlit Authenticator
-authenticator = stauth.Authenticate(
-    credentials=credentials,
-    cookie_name="ec_review_auth_cookie",
-    cookie_key="ec_jwt_secret_token_key_review_app_2026",
-    cookie_expiry_days=1.0,
-    auto_hash=False  # Passwords are already hashed with bcrypt in SQLite
-)
+# 2. Setup Streamlit Authenticator via service layer
+authenticator = services.get_authenticator()
 
 # Navigation and role state
 if "page" not in st.session_state:
@@ -110,7 +97,7 @@ if not st.session_state.get("authentication_status"):
                 # Check authentication status returned by authenticator
                 if st.session_state.get("authentication_status"):
                     username = st.session_state.get("username")
-                    user_info = db.get_user(username)
+                    user_info = services.get_user_profile(username)
                     if user_info:
                         st.session_state["role"] = user_info["role"]
                         st.session_state["name"] = user_info["name"]
@@ -136,25 +123,19 @@ if not st.session_state.get("authentication_status"):
                     submit_signup = st.form_submit_button("Register Account", use_container_width=True)
 
                     if submit_signup:
-                        if not new_name.strip() or not new_username.strip() or not new_email.strip():
-                            st.error("All fields are mandatory.")
-                        elif len(new_password) < 6:
-                            st.error("Password must be at least 6 characters long.")
-                        elif new_password != new_confirm_password:
-                            st.error("Passwords do not match.")
+                        success, message = services.register_user(
+                            name=new_name,
+                            username=new_username,
+                            email=new_email,
+                            password=new_password,
+                            confirm_password=new_confirm_password,
+                            role=new_role
+                        )
+                        if success:
+                            st.success(f"{message} Registered username: **{new_username.lower()}**. You can now log in using the 'Log In' tab!")
+                            st.rerun()
                         else:
-                            success, message = db.create_user(
-                                username=new_username,
-                                name=new_name,
-                                email=new_email,
-                                plain_password=new_password,
-                                role=new_role
-                            )
-                            if success:
-                                st.success(f"{message} Registered username: **{new_username.lower()}**. You can now log in using the 'Log In' tab!")
-                                st.rerun()
-                            else:
-                                st.error(message)
+                            st.error(message)
 
         # Halt execution so unauthenticated users see nothing else
         st.stop()
@@ -166,7 +147,7 @@ if not st.session_state.get("authentication_status"):
 # Ensure role is set in session state
 current_username = st.session_state.get("username")
 if not st.session_state.get("role") and current_username:
-    user_data = db.get_user(current_username)
+    user_data = services.get_user_profile(current_username)
     if user_data:
         st.session_state["role"] = user_data["role"]
         st.session_state["name"] = user_data["name"]
@@ -310,47 +291,14 @@ if not has_review_result or current_auth_page == "submit":
         submit_button = st.button("🚀 Submit for Review", type="primary", use_container_width=True)
 
     # Quick-load past reviewed projects if no review is currently displayed
-    past_projects = db.get_all_projects_with_followups()
+    past_projects = services.get_all_reviewed_projects()
     if past_projects:
         with st.expander("📂 Or View/Resolve Clarifications for an Existing Project", expanded=(current_role == "applicant")):
             sel_project = st.selectbox("Select Audited Project:", options=past_projects, key="sel_past_proj")
             if st.button("🔍 Open Project Clarifications", key="btn_load_proj", use_container_width=True):
-                records = db.get_project_followups(sel_project)
-                if records:
-                    loaded_issues = []
-                    missing_st = []
-                    for r in records:
-                        iss = Issue(
-                            id=r["issue_id"],
-                            category=r["category"] or "Inconsistency",
-                            severity=r["severity"] or "Medium",
-                            description=r["description"] or "",
-                            evidence_page=r["evidence_page"],
-                            evidence_text=r["evidence_text"],
-                            follow_up_question=r["follow_up_question"],
-                            status=r["status"] or "Open",
-                            applicant_reply=r["applicant_reply"],
-                            ai_reason=r["ai_reason"],
-                            reviewer_decision=r.get("reviewer_decision", "Pending") or "Pending"
-                        )
-                        loaded_issues.append(iss)
-                        if iss.category == "Missing Study":
-                            clean_m = iss.description.replace("Missing mandatory study: ", "").strip()
-                            if clean_m and clean_m not in missing_st:
-                                missing_st.append(clean_m)
-
-                    resolved_c = sum(1 for i in loaded_issues if i.status == "Resolved")
-                    calc_score = min(95, max(30, int((len(loaded_issues) - (len(loaded_issues) - resolved_c)) / max(len(loaded_issues), 1) * 100)))
-
-                    stored_trace = db.get_application_trace(sel_project)
-                    st.session_state["review_result"] = ReviewResult(
-                        project_name=sel_project,
-                        completeness_score=calc_score,
-                        missing_studies=missing_st,
-                        issues=loaded_issues,
-                        summary=f"Audit loaded from database for '{sel_project}'. Contains {len(loaded_issues)} tracked compliance issues.",
-                        agent_trace=stored_trace
-                    )
+                loaded_audit = services.load_project_audit(sel_project)
+                if loaded_audit:
+                    st.session_state["review_result"] = loaded_audit
                     st.session_state["review_project_name"] = sel_project
                     st.session_state["auth_page"] = "results"
                     st.rerun()
@@ -362,59 +310,37 @@ if not has_review_result or current_auth_page == "submit":
         elif uploaded_pdf is None:
             st.error("Please upload a PDF file of the Environmental Clearance report.")
         else:
-            # Step 1: Extract text using PyMuPDF
-            with st.spinner("📄 Extracting page-by-page text from PDF using PyMuPDF..."):
-                extracted_text, total_pages = extract.extract_text(uploaded_pdf)
+            with st.status("🤖 Multi-Agent Review Pipeline Running...", expanded=True) as status_box:
+                def live_trace_callback(step: dict):
+                    ag = step.get("agent", "Agent")
+                    act = step.get("action", "")
+                    obs = step.get("observation", "")
+                    st_val = step.get("status", "success")
+                    icon = "✅" if st_val in ("success", "verified") else ("⚠️" if st_val in ("retry", "fallback") else "ℹ️")
+                    status_box.write(f"{icon} **[{ag}]** `{act}` &mdash; *{obs}*")
 
-            if not extracted_text:
-                st.warning(
-                    "⚠️ **Scanned or Image-Only PDF Detected:** "
-                    "The uploaded document contains no extractable digital text. "
-                    "Per system guidelines, OCR is disabled. Please upload a report containing digital selectable text."
+                review_result, err_msg, total_pages = services.process_application_review(
+                    uploaded_file=uploaded_pdf,
+                    project_name=project_name,
+                    trace_callback=live_trace_callback
                 )
-            else:
-                st.info(f"Extracted {total_pages} page(s) with digital text. Initiating Multi-Agent Pipeline...")
-                
-                # Step 2: Multi-Agent System (Planner, Specialists, Verifier) with live st.status
-                with st.status("🤖 Multi-Agent Review Pipeline Running...", expanded=True) as status_box:
-                    def live_trace_callback(step: dict):
-                        ag = step.get("agent", "Agent")
-                        act = step.get("action", "")
-                        obs = step.get("observation", "")
-                        st_val = step.get("status", "success")
-                        icon = "✅" if st_val in ("success", "verified") else ("⚠️" if st_val in ("retry", "fallback") else "ℹ️")
-                        status_box.write(f"{icon} **[{ag}]** `{act}` &mdash; *{obs}*")
 
-                    try:
-                        review_result = review.review_application(
-                            extracted_text,
-                            project_name=project_name.strip(),
-                            trace_callback=live_trace_callback
-                        )
-                        # Store in SQLite applications table
-                        db.store_application_trace(
-                            project_name=project_name.strip(),
-                            agent_trace=review_result.agent_trace,
-                            completeness_score=review_result.completeness_score,
-                            summary=review_result.summary
-                        )
-                        # Sync issues with SQLite followups table
-                        review_result.issues = db.sync_review_issues(project_name.strip(), review_result.issues)
-                        st.session_state["review_result"] = review_result
-                        st.session_state["review_project_name"] = project_name.strip()
-                        status_box.update(label="🎉 Multi-Agent Review Pipeline Completed!", state="complete", expanded=False)
-                        st.session_state["auth_page"] = "results"
-                        st.rerun()
-                    except Exception as err:
-                        status_box.update(label="❌ Multi-Agent Review Pipeline Error", state="error")
-                        st.error(f"❌ Review error: {err}")
+                if err_msg:
+                    status_box.update(label="❌ Multi-Agent Review Pipeline Error", state="error")
+                    st.error(err_msg)
+                elif review_result:
+                    st.session_state["review_result"] = review_result
+                    st.session_state["review_project_name"] = project_name.strip()
+                    status_box.update(label="🎉 Multi-Agent Review Pipeline Completed!", state="complete", expanded=False)
+                    st.session_state["auth_page"] = "results"
+                    st.rerun()
 
 elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and has_review_result:
     # --------------------------------------------------------------------------
     # PAGE 3: REVIEWER PRIORITY ACTION VIEW (Role: Reviewer Only)
     # --------------------------------------------------------------------------
     result: ReviewResult = st.session_state["review_result"]
-    result.issues = db.sync_review_issues(result.project_name, result.issues)
+    result.issues = services.sync_project_issues(result.project_name, result.issues)
 
     col_nav_back, col_nav_title, col_nav_all = st.columns([1.2, 3, 1.5])
     with col_nav_back:
@@ -429,42 +355,26 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
             st.rerun()
 
     # 1. Summary Metrics at top: Total issues, High, Open, Confirmed, Dismissed
-    total_issues_count = len(result.issues)
-    high_count = sum(1 for i in result.issues if i.severity == "High")
-    open_count = sum(1 for i in result.issues if i.status in ("Open", "Still Open"))
-    confirmed_count = sum(1 for i in result.issues if getattr(i, "reviewer_decision", None) == "Confirmed")
-    dismissed_count = sum(1 for i in result.issues if getattr(i, "reviewer_decision", None) == "Dismissed")
+    metrics = services.calculate_reviewer_metrics(result.issues)
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Total Issues", total_issues_count)
-    m2.metric("High Severity", high_count, delta="Critical" if high_count > 0 else None, delta_color="inverse")
-    m3.metric("Open Status", open_count)
-    m4.metric("Confirmed", confirmed_count)
-    m5.metric("Dismissed", dismissed_count)
+    m1.metric("Total Issues", metrics["total"])
+    m2.metric("High Severity", metrics["high"], delta="Critical" if metrics["high"] > 0 else None, delta_color="inverse")
+    m3.metric("Open Status", metrics["open"])
+    m4.metric("Confirmed", metrics["confirmed"])
+    m5.metric("Dismissed", metrics["dismissed"])
 
     # 2. Top section "Needs Your Attention": top 3 most critical issues
-    # (sort: High severity first, then Open status, then Contradiction category first)
     st.divider()
     st.markdown("### 🚨 Needs Your Attention")
     st.caption("Top 3 most critical issues sorted by High severity first, then Open status, then Contradiction category:")
 
-    def priority_sort_key(iss):
-        sev_rank = {"High": 0, "Medium": 1, "Low": 2}.get(iss.severity, 3)
-        status_rank = 0 if iss.status in ("Open", "Still Open") else (1 if iss.status == "Needs More Info" else 2)
-        cat_rank = 0 if iss.category == "Contradiction" else (1 if iss.category == "Inconsistency" else 2)
-        return (sev_rank, status_rank, cat_rank)
-
-    # Show top 3 critical issues, prioritizing active/un-dismissed ones
-    active_critical = [i for i in result.issues if getattr(i, "reviewer_decision", None) != "Dismissed"]
-    if not active_critical:
-        active_critical = result.issues
-    top_3 = sorted(active_critical, key=priority_sort_key)[:3]
+    top_3 = services.get_top_critical_issues(result.issues, limit=3)
 
     if top_3:
         cols_top = st.columns(len(top_3))
         for idx, iss in enumerate(top_3):
             with cols_top[idx]:
-                sev_color = "red" if iss.severity == "High" else ("orange" if iss.severity == "Medium" else "green")
                 is_conf = getattr(iss, "reviewer_decision", None) == "Confirmed"
                 is_dism = getattr(iss, "reviewer_decision", None) == "Dismissed"
 
@@ -496,13 +406,11 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
                 c_btn1, c_btn2 = st.columns(2)
                 with c_btn1:
                     if st.button("✅ Confirm", key=f"top_conf_{iss.id}_{idx}", type="primary" if is_conf else "secondary", use_container_width=True):
-                        db.update_reviewer_decision(iss.id, "Confirmed")
-                        iss.reviewer_decision = "Confirmed"
+                        services.update_issue_decision(iss, "Confirmed")
                         st.rerun()
                 with c_btn2:
                     if st.button("❌ Dismiss", key=f"top_dism_{iss.id}_{idx}", use_container_width=True):
-                        db.update_reviewer_decision(iss.id, "Dismissed")
-                        iss.reviewer_decision = "Dismissed"
+                        services.update_issue_decision(iss, "Dismissed")
                         st.rerun()
 
     # 3. Filters: severity (High / Medium / Low / All), status (Open / Resolved / All), category
@@ -517,17 +425,7 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
         all_categories = ["All"] + sorted(list(set(i.category for i in result.issues if i.category)))
         filter_cat = st.selectbox("Category:", all_categories, key="prio_filter_cat")
 
-    filtered_issues = []
-    for iss in result.issues:
-        if filter_sev != "All" and iss.severity != filter_sev:
-            continue
-        if filter_status == "Open" and iss.status not in ("Open", "Still Open"):
-            continue
-        if filter_status == "Resolved" and iss.status != "Resolved":
-            continue
-        if filter_cat != "All" and iss.category != filter_cat:
-            continue
-        filtered_issues.append(iss)
+    filtered_issues = services.filter_issues(result.issues, filter_sev, filter_status, filter_cat)
 
     # 4. Full issues table below, colour-coded by severity with Confirm & Dismiss buttons
     st.markdown(f"### 📋 Full Issues ({len(filtered_issues)} matching filters)")
@@ -575,12 +473,10 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
                 with c_right:
                     st.caption("Reviewer Action:")
                     if st.button("✅ Confirm", key=f"prio_conf_{iss.id}_{idx}", use_container_width=True, type="primary" if is_confirmed else "secondary"):
-                        db.update_reviewer_decision(iss.id, "Confirmed")
-                        iss.reviewer_decision = "Confirmed"
+                        services.update_issue_decision(iss, "Confirmed")
                         st.rerun()
                     if st.button("❌ Dismiss", key=f"prio_dism_{iss.id}_{idx}", use_container_width=True):
-                        db.update_reviewer_decision(iss.id, "Dismissed")
-                        iss.reviewer_decision = "Dismissed"
+                        services.update_issue_decision(iss, "Dismissed")
                         st.rerun()
 
                 st.markdown("</div>", unsafe_allow_html=True)
@@ -589,12 +485,11 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
     st.divider()
     c_dl1, c_dl2 = st.columns([1, 1])
     with c_dl1:
-        pdf_bytes = report.generate_review_pdf(result)
-        safe_filename = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in result.project_name.strip()).strip("_") or "EC_Report"
+        pdf_bytes, report_filename = services.generate_report_download(result)
         st.download_button(
             label="📥 Download Updated Error Report (PDF)",
             data=pdf_bytes,
-            file_name=f"VYRO_Review_Report_{safe_filename}.pdf",
+            file_name=report_filename,
             mime="application/pdf",
             type="primary",
             use_container_width=True,
@@ -610,7 +505,7 @@ else:
     # PAGE 2: AUDIT RESULTS DASHBOARD & APPLICANT FOLLOW-UP (Dedicated Page)
     # --------------------------------------------------------------------------
     result: ReviewResult = st.session_state["review_result"]
-    result.issues = db.sync_review_issues(result.project_name, result.issues)
+    result.issues = services.sync_project_issues(result.project_name, result.issues)
 
     col_nav_back, col_nav_title, col_nav_priority = st.columns([1.2, 3, 1.5])
     with col_nav_back:
@@ -671,17 +566,8 @@ else:
     # 4. Color-coded Issues Table (Pandas)
     st.markdown("### 🔍 Issues, Figures Inconsistencies & Contradictions")
     if result.issues:
-        data = []
-        for issue in result.issues:
-            data.append({
-                "Severity": issue.severity,
-                "Category": issue.category,
-                "Evidence Page": issue.evidence_page or "N/A",
-                "Description": issue.description,
-                "Evidence Quote": issue.evidence_text or "N/A",
-                "Follow-up Query to Applicant": issue.follow_up_question or "N/A"
-            })
-        df = pd.DataFrame(data)
+        table_data = services.format_issues_table_data(result.issues)
+        df = pd.DataFrame(table_data)
 
         # High red, Medium orange, Low green
         def color_severity(val):
@@ -703,15 +589,11 @@ else:
     
     col_dl, col_reset = st.columns([1, 1])
     with col_dl:
-        pdf_bytes = report.generate_review_pdf(result)
-        safe_filename = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in result.project_name.strip()).strip("_")
-        if not safe_filename:
-            safe_filename = "EC_Report"
-
+        pdf_bytes, report_filename = services.generate_report_download(result)
         st.download_button(
             label="📥 Download Error Report (PDF)",
             data=pdf_bytes,
-            file_name=f"VYRO_Review_Report_{safe_filename}.pdf",
+            file_name=report_filename,
             mime="application/pdf",
             type="primary",
             use_container_width=True,
@@ -733,13 +615,7 @@ else:
     st.caption("Address flagged deficiencies and queries directly. VYRO AI evaluates your technical clarifications and supporting documentation.")
 
     # Calculate Progress: "X of Y issues resolved"
-    total_issues = len(result.issues)
-    resolved_issues = [i for i in result.issues if i.status == "Resolved"]
-    unresolved_issues = [i for i in result.issues if i.status != "Resolved"]
-    x_count = len(resolved_issues)
-    y_count = total_issues
-
-    progress_ratio = (x_count / y_count) if y_count > 0 else 1.0
+    x_count, y_count, progress_ratio, resolved_issues, unresolved_issues = services.calculate_resolution_progress(result.issues)
     st.markdown(f"### 🎯 Resolution Progress: **{x_count} of {y_count} issues resolved**")
     st.progress(progress_ratio)
 
@@ -809,26 +685,12 @@ else:
                         if not reply_input.strip() and supporting_pdf is None:
                             st.error("Please provide an explanation or upload a supporting PDF before submitting.")
                         else:
-                            supporting_text = ""
-                            if supporting_pdf is not None:
-                                with st.spinner("📄 Extracting text from supporting PDF..."):
-                                    pdf_text, _ = extract.extract_text(supporting_pdf)
-                                    supporting_text = pdf_text or ""
-                            
                             with st.spinner("🤖 Auditing reply with VYRO AI Compliance Engine..."):
-                                followup_res = review.check_followup(issue, reply_input, supporting_text)
-                            
-                            # Update in DB
-                            db.update_issue_followup(
-                                issue_id=issue.id,
-                                status=followup_res.status,
-                                applicant_reply=reply_input.strip(),
-                                ai_reason=followup_res.reason
-                            )
-                            # Update in memory
-                            issue.status = followup_res.status
-                            issue.applicant_reply = reply_input.strip()
-                            issue.ai_reason = followup_res.reason
+                                followup_res, _ = services.submit_applicant_followup(
+                                    issue=issue,
+                                    reply_text=reply_input,
+                                    supporting_pdf=supporting_pdf
+                                )
 
                             if followup_res.status == "Resolved":
                                 st.success(f"✅ **Issue Resolved:** {followup_res.reason}")

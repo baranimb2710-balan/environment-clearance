@@ -10,3 +10,6 @@ anthropic
 pypdf
 pymupdf
 reportlab
+fastapi
+uvicorn
+python-multipart
