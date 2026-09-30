@@ -342,12 +342,14 @@ if not has_review_result or current_auth_page == "submit":
                     resolved_c = sum(1 for i in loaded_issues if i.status == "Resolved")
                     calc_score = min(95, max(30, int((len(loaded_issues) - (len(loaded_issues) - resolved_c)) / max(len(loaded_issues), 1) * 100)))
 
+                    stored_trace = db.get_application_trace(sel_project)
                     st.session_state["review_result"] = ReviewResult(
                         project_name=sel_project,
                         completeness_score=calc_score,
                         missing_studies=missing_st,
                         issues=loaded_issues,
-                        summary=f"Audit loaded from database for '{sel_project}'. Contains {len(loaded_issues)} tracked compliance issues."
+                        summary=f"Audit loaded from database for '{sel_project}'. Contains {len(loaded_issues)} tracked compliance issues.",
+                        agent_trace=stored_trace
                     )
                     st.session_state["review_project_name"] = sel_project
                     st.session_state["auth_page"] = "results"
@@ -371,20 +373,40 @@ if not has_review_result or current_auth_page == "submit":
                     "Per system guidelines, OCR is disabled. Please upload a report containing digital selectable text."
                 )
             else:
-                st.info(f"Extracted {total_pages} page(s) with digital text. Initiating AI consistency audit...")
+                st.info(f"Extracted {total_pages} page(s) with digital text. Initiating Multi-Agent Pipeline...")
                 
-                # Step 2: Review using Anthropic Claude Engine
-                with st.spinner("🔍 Auditing application with VYRO AI Engine (checking mandatory checklist, figure cross-checks, contradictions)..."):
+                # Step 2: Multi-Agent System (Planner, Specialists, Verifier) with live st.status
+                with st.status("🤖 Multi-Agent Review Pipeline Running...", expanded=True) as status_box:
+                    def live_trace_callback(step: dict):
+                        ag = step.get("agent", "Agent")
+                        act = step.get("action", "")
+                        obs = step.get("observation", "")
+                        st_val = step.get("status", "success")
+                        icon = "✅" if st_val in ("success", "verified") else ("⚠️" if st_val in ("retry", "fallback") else "ℹ️")
+                        status_box.write(f"{icon} **[{ag}]** `{act}` &mdash; *{obs}*")
+
                     try:
-                        review_result = review.review_application(extracted_text, project_name=project_name.strip())
+                        review_result = review.review_application(
+                            extracted_text,
+                            project_name=project_name.strip(),
+                            trace_callback=live_trace_callback
+                        )
+                        # Store in SQLite applications table
+                        db.store_application_trace(
+                            project_name=project_name.strip(),
+                            agent_trace=review_result.agent_trace,
+                            completeness_score=review_result.completeness_score,
+                            summary=review_result.summary
+                        )
                         # Sync issues with SQLite followups table
                         review_result.issues = db.sync_review_issues(project_name.strip(), review_result.issues)
                         st.session_state["review_result"] = review_result
                         st.session_state["review_project_name"] = project_name.strip()
-                        # Navigate immediately to the dedicated Results Page
+                        status_box.update(label="🎉 Multi-Agent Review Pipeline Completed!", state="complete", expanded=False)
                         st.session_state["auth_page"] = "results"
                         st.rerun()
                     except Exception as err:
+                        status_box.update(label="❌ Multi-Agent Review Pipeline Error", state="error")
                         st.error(f"❌ Review error: {err}")
 
 elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and has_review_result:
@@ -622,6 +644,20 @@ else:
     # 2. Executive Summary
     st.markdown("### 📋 Executive Summary")
     st.info(result.summary)
+
+    # Multi-Agent Execution Trace Expander
+    if getattr(result, "agent_trace", None):
+        with st.expander(f"🤖 Multi-Agent Execution Trace ({len(result.agent_trace)} steps recorded)", expanded=False):
+            st.caption("Detailed Thought / Action / Observation log recorded across Planner, Specialists, and Verifier:")
+            for t_step in result.agent_trace:
+                ag = t_step.get("agent", "Agent")
+                act = t_step.get("action", "")
+                obs = t_step.get("observation", "")
+                st_val = t_step.get("status", "success")
+                badge_col = "green" if st_val in ("success", "verified") else ("orange" if st_val in ("retry", "fallback") else "red")
+                st.markdown(f":{badge_col}[**[{ag}]**] `{act}`")
+                st.write(f"&rarr; *{obs}*")
+
 
     # 3. Missing Studies Section
     st.markdown("### 🚨 Missing Mandatory Studies")

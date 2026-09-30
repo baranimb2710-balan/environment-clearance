@@ -2,7 +2,7 @@
 Pydantic models for data validation, user management, structured review outputs,
 and applicant follow-up loop verification.
 """
-from typing import Literal, Optional, List
+from typing import Literal, Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -78,6 +78,10 @@ class ReviewResult(BaseModel):
     summary: str = Field(
         ..., description="Executive summary paragraph detailing the review assessment"
     )
+    agent_trace: Optional[List[Dict[str, Any]]] = Field(
+        default_factory=list, description="Execution trace steps recorded across multi-agent review pipeline"
+    )
+
 
 
 class FollowupResult(BaseModel):

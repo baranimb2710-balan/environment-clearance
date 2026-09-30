@@ -91,6 +91,19 @@ def init_db():
         if "reviewer_decision" not in columns:
             cursor.execute("ALTER TABLE followups ADD COLUMN reviewer_decision TEXT DEFAULT 'Pending'")
 
+        # 4. Applications table for storing multi-agent execution trace and project audits
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS applications (
+                project_name TEXT PRIMARY KEY,
+                agent_trace TEXT,
+                completeness_score INTEGER,
+                summary TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         conn.commit()
 
 
@@ -299,4 +312,56 @@ def get_all_projects_with_followups() -> List[str]:
         cursor.execute("SELECT DISTINCT project_name FROM followups ORDER BY updated_at DESC")
         rows = cursor.fetchall()
         return [r["project_name"] for r in rows]
+
+
+def store_application_trace(
+    project_name: str,
+    agent_trace: Any,
+    completeness_score: Optional[int] = None,
+    summary: Optional[str] = None
+) -> bool:
+    """
+    Stores or updates the multi-agent execution trace for an application in SQLite.
+    Stores agent_trace in applications table as JSON text.
+    """
+    import json
+    clean_pname = project_name.strip()
+    trace_json = json.dumps(agent_trace) if not isinstance(agent_trace, str) else agent_trace
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO applications (project_name, agent_trace, completeness_score, summary, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(project_name) DO UPDATE SET
+                    agent_trace = excluded.agent_trace,
+                    completeness_score = COALESCE(excluded.completeness_score, applications.completeness_score),
+                    summary = COALESCE(excluded.summary, applications.summary),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (clean_pname, trace_json, completeness_score, summary)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error storing application trace: {e}")
+        return False
+
+
+def get_application_trace(project_name: str) -> List[Dict[str, Any]]:
+    """Retrieves the stored multi-agent execution trace for a project."""
+    import json
+    clean_pname = project_name.strip()
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT agent_trace FROM applications WHERE project_name = ?", (clean_pname,))
+            row = cursor.fetchone()
+            if row and row["agent_trace"]:
+                return json.loads(row["agent_trace"])
+    except Exception as e:
+        print(f"Error fetching application trace: {e}")
+    return []
+
 
