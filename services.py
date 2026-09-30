@@ -74,9 +74,9 @@ def get_user_profile(username: str) -> Optional[Dict[str, Any]]:
 # ------------------------------------------------------------------------------
 # 2. Audit History & Project Loading Services
 # ------------------------------------------------------------------------------
-def get_all_reviewed_projects() -> List[str]:
-    """Returns list of all audited project names present in the database."""
-    return db.get_all_projects_with_followups()
+def get_all_reviewed_projects(username: Optional[str] = None, role: Optional[str] = None) -> List[str]:
+    """Returns list of all audited project names present in the database, filtered by user if applicant."""
+    return db.get_all_projects_with_followups(username=username, role=role)
 
 
 def sync_project_issues(project_name: str, issues: List[Issue]) -> List[Issue]:
@@ -87,7 +87,7 @@ def sync_project_issues(project_name: str, issues: List[Issue]) -> List[Issue]:
 def load_project_audit(project_name: str) -> Optional[ReviewResult]:
     """
     Loads past audit issues and agent trace from SQLite, reconstitutes
-    Issue models, recalculates compliance score, and builds ReviewResult.
+    Issue models, preserves original completeness score, and builds ReviewResult.
     """
     clean_pname = project_name.strip()
     records = db.get_project_followups(clean_pname)
@@ -117,19 +117,35 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
             if clean_m and clean_m not in missing_st:
                 missing_st.append(clean_m)
 
-    resolved_count = sum(1 for i in loaded_issues if i.status == "Resolved")
-    calc_score = min(
-        95,
-        max(30, int((len(loaded_issues) - (len(loaded_issues) - resolved_count)) / max(len(loaded_issues), 1) * 100))
-    )
+    # Fetch stored score and summary from applications table
+    stored_score = None
+    stored_summary = None
+    with db.db_session() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT completeness_score, summary FROM applications WHERE project_name = ?", (clean_pname,))
+        app_row = cur.fetchone()
+        if app_row:
+            stored_score = app_row["completeness_score"]
+            stored_summary = app_row["summary"]
+
+    if stored_score is not None:
+        final_score = stored_score
+    else:
+        resolved_count = sum(1 for i in loaded_issues if i.status == "Resolved")
+        final_score = min(
+            95,
+            max(30, int((len(loaded_issues) - (len(loaded_issues) - resolved_count)) / max(len(loaded_issues), 1) * 100))
+        )
+
     stored_trace = db.get_application_trace(clean_pname)
+    final_summary = stored_summary or f"Audit loaded from database for '{clean_pname}'. Contains {len(loaded_issues)} tracked compliance issues."
 
     return ReviewResult(
         project_name=clean_pname,
-        completeness_score=calc_score,
+        completeness_score=final_score,
         missing_studies=missing_st,
         issues=loaded_issues,
-        summary=f"Audit loaded from database for '{clean_pname}'. Contains {len(loaded_issues)} tracked compliance issues.",
+        summary=final_summary,
         agent_trace=stored_trace
     )
 
@@ -140,7 +156,8 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
 def process_application_review(
     uploaded_file: Any,
     project_name: str,
-    trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    owner_username: Optional[str] = None
 ) -> Tuple[Optional[ReviewResult], Optional[str], Optional[int]]:
     """
     Extracts text from PDF, executes the multi-agent review pipeline,
@@ -169,12 +186,13 @@ def process_application_review(
             project_name=clean_pname,
             trace_callback=trace_callback
         )
-        # Store execution trace in SQLite applications table
+        # Store execution trace and metadata in SQLite applications table
         db.store_application_trace(
             project_name=clean_pname,
             agent_trace=review_result.agent_trace,
             completeness_score=review_result.completeness_score,
-            summary=review_result.summary
+            summary=review_result.summary,
+            owner_username=owner_username
         )
         # Synchronize issues with followups table
         review_result.issues = db.sync_review_issues(clean_pname, review_result.issues)

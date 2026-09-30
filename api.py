@@ -62,7 +62,7 @@ class IssueStatusRequest(BaseModel):
 def find_application(app_identifier: str) -> Optional[Dict[str, Any]]:
     """Lookup application record by integer rowid or project_name."""
     clean_id = app_identifier.strip()
-    with db.get_db_connection() as conn:
+    with db.db_session() as conn:
         cur = conn.cursor()
         if clean_id.isdigit():
             cur.execute(
@@ -232,35 +232,40 @@ async def create_application_review(
     }
 
 
-# 3. List and Get Application Details
 @app.get("/applications", tags=["Applications"])
 def list_applications():
     """
-    Lists all reviewed applications with summary metrics.
+    Lists all reviewed applications with summary metrics using an optimized single query.
     """
-    with db.get_db_connection() as conn:
+    with db.db_session() as conn:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT rowid AS id, project_name, completeness_score, summary, updated_at 
-            FROM applications 
-            ORDER BY updated_at DESC
+            SELECT 
+                a.rowid AS id, 
+                a.project_name, 
+                a.completeness_score, 
+                a.summary, 
+                a.updated_at,
+                COUNT(f.issue_id) AS total_issues,
+                SUM(CASE WHEN f.status IN ('Open', 'Still Open') THEN 1 ELSE 0 END) AS open_issues
+            FROM applications a
+            LEFT JOIN followups f ON a.project_name = f.project_name
+            GROUP BY a.project_name
+            ORDER BY a.updated_at DESC
             """
         )
         rows = cur.fetchall()
 
     results = []
     for r in rows:
-        followups = db.get_project_followups(r["project_name"])
-        total_issues = len(followups)
-        open_issues = sum(1 for i in followups if i.get("status") in ("Open", "Still Open"))
         results.append({
             "id": r["id"],
             "project_name": r["project_name"],
             "score": r["completeness_score"],
             "summary": r["summary"],
-            "total_issues": total_issues,
-            "open_issues": open_issues,
+            "total_issues": r["total_issues"] or 0,
+            "open_issues": r["open_issues"] or 0,
             "updated_at": r["updated_at"]
         })
     return results
@@ -331,7 +336,7 @@ def update_issue_status(
 
     # Verify issue belongs to this project
     pname = app_record["project_name"]
-    with db.get_db_connection() as conn:
+    with db.db_session() as conn:
         cur = conn.cursor()
         cur.execute(
             "SELECT issue_id FROM followups WHERE issue_id = ? AND project_name = ?",

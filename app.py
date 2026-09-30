@@ -291,7 +291,7 @@ if not has_review_result or current_auth_page == "submit":
         submit_button = st.button("🚀 Submit for Review", type="primary", use_container_width=True)
 
     # Quick-load past reviewed projects if no review is currently displayed
-    past_projects = services.get_all_reviewed_projects()
+    past_projects = services.get_all_reviewed_projects(username=current_username, role=current_role)
     if past_projects:
         with st.expander("📂 Or View/Resolve Clarifications for an Existing Project", expanded=(current_role == "applicant")):
             sel_project = st.selectbox("Select Audited Project:", options=past_projects, key="sel_past_proj")
@@ -322,7 +322,8 @@ if not has_review_result or current_auth_page == "submit":
                 review_result, err_msg, total_pages = services.process_application_review(
                     uploaded_file=uploaded_pdf,
                     project_name=project_name,
-                    trace_callback=live_trace_callback
+                    trace_callback=live_trace_callback,
+                    owner_username=current_username
                 )
 
                 if err_msg:
