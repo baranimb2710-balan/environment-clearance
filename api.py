@@ -8,7 +8,8 @@ import sqlite3
 from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status, Body, Response
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status, Body, Response, Depends, Header
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -41,6 +42,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Authentication Security Scheme
+security = HTTPBasic(auto_error=False)
+
+
+def get_current_user_optional(
+    credentials: Optional[HTTPBasicCredentials] = Depends(security),
+    x_user: Optional[str] = Header(None, alias="X-User")
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolves the current user via HTTP Basic credentials or X-User header.
+    Returns user dict or None if anonymous / unauthenticated.
+    """
+    if credentials and credentials.username:
+        user = db.get_user(credentials.username)
+        if user and db.verify_password(credentials.password, user["hashed_password"]):
+            return user
+    if x_user:
+        user = db.get_user(x_user.strip())
+        if user:
+            return user
+    return None
 
 
 # ------------------------------------------------------------------------------
@@ -149,13 +172,14 @@ def login(creds: LoginRequest):
 @app.post("/applications", status_code=status.HTTP_201_CREATED, tags=["Applications"])
 async def create_application_review(
     file: UploadFile = File(..., description="Environmental Clearance Application PDF"),
-    project_name: str = Form(..., description="Official project or plant name")
+    project_name: str = Form(..., description="Official project or plant name"),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
     Uploads an EC application PDF and project name.
     1. Extracts digital text page-by-page via extract.py (PyMuPDF).
     2. Runs Multi-Agent Review Pipeline (review.review_application()).
-    3. Persists trace and issues to SQLite.
+    3. Persists trace, missing studies, and issues to SQLite.
     4. Returns score, rule_results, and issues.
     """
     clean_pname = project_name.strip()
@@ -197,11 +221,14 @@ async def create_application_review(
         )
 
     # Step 3: Persist trace in applications table & sync issues in followups table
+    owner_username = current_user["username"] if current_user else "admin"
     db.store_application_trace(
         project_name=clean_pname,
         agent_trace=review_result.agent_trace,
         completeness_score=review_result.completeness_score,
-        summary=review_result.summary
+        summary=review_result.summary,
+        owner_username=owner_username,
+        missing_studies=review_result.missing_studies
     )
     synced_issues = db.sync_review_issues(clean_pname, review_result.issues)
     review_result.issues = synced_issues
@@ -233,28 +260,50 @@ async def create_application_review(
 
 
 @app.get("/applications", tags=["Applications"])
-def list_applications():
+def list_applications(current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
     """
-    Lists all reviewed applications with summary metrics using an optimized single query.
+    Lists reviewed applications with summary metrics using an optimized single query.
+    If authenticated as an applicant, filters only to applications owned by this applicant.
+    Reviewers and unauthenticated requests see all applications.
     """
     with db.db_session() as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT 
-                a.rowid AS id, 
-                a.project_name, 
-                a.completeness_score, 
-                a.summary, 
-                a.updated_at,
-                COUNT(f.issue_id) AS total_issues,
-                SUM(CASE WHEN f.status IN ('Open', 'Still Open') THEN 1 ELSE 0 END) AS open_issues
-            FROM applications a
-            LEFT JOIN followups f ON a.project_name = f.project_name
-            GROUP BY a.project_name
-            ORDER BY a.updated_at DESC
-            """
-        )
+        if current_user and current_user.get("role") == "applicant":
+            cur.execute(
+                """
+                SELECT 
+                    a.rowid AS id, 
+                    a.project_name, 
+                    a.completeness_score, 
+                    a.summary, 
+                    a.updated_at,
+                    COUNT(f.issue_id) AS total_issues,
+                    SUM(CASE WHEN f.status IN ('Open', 'Still Open') THEN 1 ELSE 0 END) AS open_issues
+                FROM applications a
+                LEFT JOIN followups f ON a.project_name = f.project_name
+                WHERE a.owner_username = ? OR a.owner_username IS NULL OR a.owner_username = 'admin'
+                GROUP BY a.project_name
+                ORDER BY a.updated_at DESC
+                """,
+                (current_user["username"],)
+            )
+        else:
+            cur.execute(
+                """
+                SELECT 
+                    a.rowid AS id, 
+                    a.project_name, 
+                    a.completeness_score, 
+                    a.summary, 
+                    a.updated_at,
+                    COUNT(f.issue_id) AS total_issues,
+                    SUM(CASE WHEN f.status IN ('Open', 'Still Open') THEN 1 ELSE 0 END) AS open_issues
+                FROM applications a
+                LEFT JOIN followups f ON a.project_name = f.project_name
+                GROUP BY a.project_name
+                ORDER BY a.updated_at DESC
+                """
+            )
         rows = cur.fetchall()
 
     results = []
@@ -272,10 +321,11 @@ def list_applications():
 
 
 @app.get("/applications/{id}", tags=["Applications"])
-def get_application(id: str):
+def get_application(id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
     """
     Retrieves full details of an application (by ID or project name),
     including all tracked issues and the multi-agent execution trace.
+    Enforces tenant access isolation for applicants.
     """
     app_record = find_application(id)
     if not app_record:
@@ -283,6 +333,15 @@ def get_application(id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Application '{id}' not found."
         )
+
+    # Tenant isolation check
+    if current_user and current_user.get("role") == "applicant":
+        owner = app_record.get("owner_username") or "admin"
+        if owner not in (current_user["username"], "admin"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only view applications belonging to your account."
+            )
 
     pname = app_record["project_name"]
     issues = db.get_project_followups(pname)
@@ -309,12 +368,19 @@ def get_application(id: str):
 def update_issue_status(
     id: str,
     issue_id: str,
-    payload: IssueStatusRequest = Body(...)
+    payload: IssueStatusRequest = Body(...),
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
     """
     Updates the reviewer decision for a specific issue ('Confirm' or 'Dismiss').
-    Persists decision in SQLite followups table.
+    Persists decision in SQLite followups table. Restricted to reviewers.
     """
+    if current_user and current_user.get("role") == "applicant":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. Only authorized reviewers can confirm or dismiss compliance issues."
+        )
+
     app_record = find_application(id)
     if not app_record:
         raise HTTPException(
@@ -364,10 +430,11 @@ def update_issue_status(
 
 # 5. Download Review PDF Report
 @app.get("/applications/{id}/report", tags=["Applications"])
-def download_application_report(id: str):
+def download_application_report(id: str, current_user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)):
     """
     Generates and returns the PDF Review Report for the application
     using ReportLab (report.py). Excludes dismissed issues automatically.
+    Enforces tenant isolation for applicants.
     """
     app_record = find_application(id)
     if not app_record:
@@ -375,6 +442,15 @@ def download_application_report(id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Application '{id}' not found."
         )
+
+    # Tenant isolation check
+    if current_user and current_user.get("role") == "applicant":
+        owner = app_record.get("owner_username") or "admin"
+        if owner not in (current_user["username"], "admin"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied. You can only download reports for your own applications."
+            )
 
     pname = app_record["project_name"]
     records = db.get_project_followups(pname)
@@ -402,10 +478,20 @@ def download_application_report(id: str):
             if clean_m and clean_m not in missing_st:
                 missing_st.append(clean_m)
 
+    # Prefer stored missing_studies JSON from database
+    final_missing = missing_st
+    if app_record.get("missing_studies"):
+        try:
+            parsed = json.loads(app_record["missing_studies"])
+            if isinstance(parsed, list):
+                final_missing = parsed
+        except Exception:
+            pass
+
     review_res = ReviewResult(
         project_name=pname,
         completeness_score=app_record.get("completeness_score") or 0,
-        missing_studies=missing_st,
+        missing_studies=final_missing,
         issues=loaded_issues,
         summary=app_record.get("summary") or f"Environmental clearance report audit for {pname}."
     )

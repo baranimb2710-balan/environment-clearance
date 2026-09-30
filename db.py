@@ -92,17 +92,20 @@ def init_db():
                 agent_trace TEXT,
                 completeness_score INTEGER,
                 summary TEXT,
+                missing_studies TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
-        # Automatic migration: ensure owner_username column exists
+        # Automatic migration: ensure owner_username and missing_studies columns exist
         cursor.execute("PRAGMA table_info(applications)")
         app_cols = [row[1] for row in cursor.fetchall()]
         if "owner_username" not in app_cols:
             cursor.execute("ALTER TABLE applications ADD COLUMN owner_username TEXT DEFAULT 'admin'")
+        if "missing_studies" not in app_cols:
+            cursor.execute("ALTER TABLE applications ADD COLUMN missing_studies TEXT")
 
-        # 4. Follow-ups table for applicant clarification loop & reviewer decisions
+        # 4. Follow-ups table with Foreign Key ON DELETE CASCADE
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS followups (
@@ -118,7 +121,8 @@ def init_db():
                 applicant_reply TEXT,
                 ai_reason TEXT,
                 reviewer_decision TEXT DEFAULT 'Pending',
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_name) REFERENCES applications(project_name) ON DELETE CASCADE
             )
             """
         )
@@ -128,12 +132,56 @@ def init_db():
         if "reviewer_decision" not in followup_cols:
             cursor.execute("ALTER TABLE followups ADD COLUMN reviewer_decision TEXT DEFAULT 'Pending'")
 
-        # 5. Performance Indexes
+        # Ensure foreign key constraint is present on existing followups table
+        cursor.execute("PRAGMA foreign_key_list(followups)")
+        existing_fks = cursor.fetchall()
+        has_fk = any(row[2] == "applications" for row in existing_fks)
+        if not has_fk:
+            # Rebuild followups table with foreign key constraint enabled
+            cursor.execute(
+                """
+                CREATE TABLE followups_migrated (
+                    issue_id TEXT PRIMARY KEY,
+                    project_name TEXT NOT NULL,
+                    category TEXT,
+                    severity TEXT,
+                    description TEXT,
+                    evidence_page TEXT,
+                    evidence_text TEXT,
+                    follow_up_question TEXT,
+                    status TEXT NOT NULL DEFAULT 'Open' CHECK(status IN ('Open', 'Resolved', 'Needs More Info', 'Still Open')),
+                    applicant_reply TEXT,
+                    ai_reason TEXT,
+                    reviewer_decision TEXT DEFAULT 'Pending',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_name) REFERENCES applications(project_name) ON DELETE CASCADE
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO followups_migrated (
+                    issue_id, project_name, category, severity, description,
+                    evidence_page, evidence_text, follow_up_question, status,
+                    applicant_reply, ai_reason, reviewer_decision, updated_at
+                )
+                SELECT 
+                    issue_id, project_name, category, severity, description,
+                    evidence_page, evidence_text, follow_up_question, status,
+                    applicant_reply, ai_reason, COALESCE(reviewer_decision, 'Pending'), updated_at
+                FROM followups
+                """
+            )
+            cursor.execute("DROP TABLE followups;")
+            cursor.execute("ALTER TABLE followups_migrated RENAME TO followups;")
+
+        # 5. Performance and Integrity Indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_followups_project_name ON followups(project_name);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_followups_updated_at ON followups(updated_at);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_followups_pname_status ON followups(project_name, status);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_applications_updated_at ON applications(updated_at);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_applications_owner ON applications(owner_username);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(email);")
 
 
 def get_user(identifier: str) -> Optional[Dict[str, Any]]:
@@ -228,6 +276,17 @@ def create_user(username: str, name: str, email: str, plain_password: str, role:
         with db_session() as conn:
             cursor = conn.cursor()
             cursor.execute(
+                "SELECT username, email FROM users WHERE LOWER(username) = ? OR LOWER(email) = ?",
+                (username_clean, email_clean)
+            )
+            existing = cursor.fetchone()
+            if existing:
+                if existing["username"].lower() == username_clean:
+                    return False, f"Username '{username_clean}' already exists."
+                else:
+                    return False, f"Email '{email_clean}' is already registered."
+
+            cursor.execute(
                 """
                 INSERT INTO users (username, name, email, hashed_password, role)
                 VALUES (?, ?, ?, ?, ?)
@@ -235,7 +294,9 @@ def create_user(username: str, name: str, email: str, plain_password: str, role:
                 (username_clean, name.strip(), email_clean, hashed, role)
             )
             return True, "User registered successfully!"
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as ie:
+        if "email" in str(ie).lower():
+            return False, f"Email '{email_clean}' is already registered."
         return False, f"Username '{username_clean}' already exists."
     except Exception as e:
         return False, f"Database error: {str(e)}"
@@ -367,29 +428,32 @@ def store_application_trace(
     agent_trace: Any,
     completeness_score: Optional[int] = None,
     summary: Optional[str] = None,
-    owner_username: Optional[str] = None
+    owner_username: Optional[str] = None,
+    missing_studies: Optional[List[str]] = None
 ) -> bool:
     """
     Stores or updates the multi-agent execution trace and metadata for an application in SQLite.
-    Stores agent_trace in applications table as JSON text.
+    Stores agent_trace and missing_studies in applications table as JSON text.
     """
     clean_pname = project_name.strip()
     trace_json = json.dumps(agent_trace) if not isinstance(agent_trace, str) else agent_trace
+    missing_json = json.dumps(missing_studies) if missing_studies is not None else None
     try:
         with db_session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO applications (project_name, owner_username, agent_trace, completeness_score, summary, updated_at)
-                VALUES (?, COALESCE(?, 'admin'), ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO applications (project_name, owner_username, agent_trace, completeness_score, summary, missing_studies, updated_at)
+                VALUES (?, COALESCE(?, 'admin'), ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(project_name) DO UPDATE SET
                     owner_username = COALESCE(excluded.owner_username, applications.owner_username),
                     agent_trace = excluded.agent_trace,
                     completeness_score = COALESCE(excluded.completeness_score, applications.completeness_score),
                     summary = COALESCE(excluded.summary, applications.summary),
+                    missing_studies = COALESCE(excluded.missing_studies, applications.missing_studies),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (clean_pname, owner_username, trace_json, completeness_score, summary)
+                (clean_pname, owner_username, trace_json, completeness_score, summary, missing_json)
             )
             return True
     except Exception as e:

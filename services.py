@@ -3,6 +3,7 @@ Service layer for VYRO - Environmental Clearance Application Review System.
 Centralizes all business logic, scoring algorithms, filtering rules, database operations,
 data transformations, and pipeline orchestrations outside of the Streamlit UI.
 """
+import json
 from typing import Optional, List, Dict, Any, Tuple, Callable
 import streamlit_authenticator as stauth
 
@@ -88,6 +89,7 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
     """
     Loads past audit issues and agent trace from SQLite, reconstitutes
     Issue models, preserves original completeness score, and builds ReviewResult.
+    Directly retrieves stored missing_studies JSON from database, with fallback.
     """
     clean_pname = project_name.strip()
     records = db.get_project_followups(clean_pname)
@@ -117,16 +119,27 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
             if clean_m and clean_m not in missing_st:
                 missing_st.append(clean_m)
 
-    # Fetch stored score and summary from applications table
+    # Fetch stored score, summary, and missing_studies from applications table
     stored_score = None
     stored_summary = None
+    stored_missing = None
     with db.db_session() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT completeness_score, summary FROM applications WHERE project_name = ?", (clean_pname,))
+        cur.execute(
+            "SELECT completeness_score, summary, missing_studies FROM applications WHERE project_name = ?",
+            (clean_pname,)
+        )
         app_row = cur.fetchone()
         if app_row:
             stored_score = app_row["completeness_score"]
             stored_summary = app_row["summary"]
+            if app_row["missing_studies"]:
+                try:
+                    parsed = json.loads(app_row["missing_studies"])
+                    if isinstance(parsed, list):
+                        stored_missing = parsed
+                except Exception:
+                    stored_missing = None
 
     if stored_score is not None:
         final_score = stored_score
@@ -137,13 +150,14 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
             max(30, int((len(loaded_issues) - (len(loaded_issues) - resolved_count)) / max(len(loaded_issues), 1) * 100))
         )
 
+    final_missing = stored_missing if stored_missing is not None else missing_st
     stored_trace = db.get_application_trace(clean_pname)
     final_summary = stored_summary or f"Audit loaded from database for '{clean_pname}'. Contains {len(loaded_issues)} tracked compliance issues."
 
     return ReviewResult(
         project_name=clean_pname,
         completeness_score=final_score,
-        missing_studies=missing_st,
+        missing_studies=final_missing,
         issues=loaded_issues,
         summary=final_summary,
         agent_trace=stored_trace
@@ -192,7 +206,8 @@ def process_application_review(
             agent_trace=review_result.agent_trace,
             completeness_score=review_result.completeness_score,
             summary=review_result.summary,
-            owner_username=owner_username
+            owner_username=owner_username,
+            missing_studies=review_result.missing_studies
         )
         # Synchronize issues with followups table
         review_result.issues = db.sync_review_issues(clean_pname, review_result.issues)
