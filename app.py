@@ -311,18 +311,45 @@ if not has_review_result or current_auth_page == "submit":
             st.error("Please upload a PDF file of the Environmental Clearance report.")
         else:
             with st.status("🤖 Multi-Agent Review Pipeline Running...", expanded=True) as status_box:
+                def live_progress_callback(stage: str, state: str, details: dict):
+                    stage_icons = {
+                        "Extracting text": "📄",
+                        "Planner": "🧠",
+                        "Specialists": "🔬",
+                        "Verifier": "⚖️",
+                        "Saving": "💾"
+                    }
+                    icon = stage_icons.get(stage, "⚙️")
+                    if state == "start":
+                        status_box.update(label=f"⏳ [{stage}] In progress...", state="running")
+                        status_box.write(f"{icon} **[{stage}]** In progress &mdash; *{details.get('message', '')}*")
+                    elif state == "complete":
+                        extra = ""
+                        if "pages" in details:
+                            extra = f" ({details['pages']} pages parsed)"
+                        elif "count" in details:
+                            extra = f" ({details['count']} issues flagged)"
+                        elif "verified" in details:
+                            extra = f" ({details['verified']} issues citation-verified)"
+                        elif "issues_count" in details:
+                            extra = f" ({details['issues_count']} issues persisted)"
+                        status_box.write(f"✅ **[{stage}]** Complete{extra}")
+                    elif state == "error":
+                        status_box.write(f"❌ **[{stage}]** Error: *{details.get('message', '')}*")
+
                 def live_trace_callback(step: dict):
                     ag = step.get("agent", "Agent")
                     act = step.get("action", "")
                     obs = step.get("observation", "")
                     st_val = step.get("status", "success")
-                    icon = "✅" if st_val in ("success", "verified") else ("⚠️" if st_val in ("retry", "fallback") else "ℹ️")
-                    status_box.write(f"{icon} **[{ag}]** `{act}` &mdash; *{obs}*")
+                    icon = "🔍" if st_val in ("success", "verified") else ("⚠️" if st_val in ("retry", "fallback") else "ℹ️")
+                    status_box.write(f"&nbsp;&nbsp;&nbsp;&nbsp;{icon} `[{ag}]` *{act}*: {obs}")
 
                 review_result, err_msg, total_pages = services.process_application_review(
                     uploaded_file=uploaded_pdf,
                     project_name=project_name,
                     trace_callback=live_trace_callback,
+                    progress_callback=live_progress_callback,
                     owner_username=current_username
                 )
 
@@ -355,20 +382,21 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
             st.session_state["auth_page"] = "results"
             st.rerun()
 
-    # 1. Summary Metrics at top: Total issues, High, Open, Confirmed, Dismissed
+    # 1. Summary Metrics at top: Total issues, Critical/Major, Pending, Confirmed, Dismissed
+    action_counts = services.get_reviewer_action_counts(result.issues)
     metrics = services.calculate_reviewer_metrics(result.issues)
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total Issues", metrics["total"])
-    m2.metric("High Severity", metrics["high"], delta="Critical" if metrics["high"] > 0 else None, delta_color="inverse")
-    m3.metric("Open Status", metrics["open"])
-    m4.metric("Confirmed", metrics["confirmed"])
-    m5.metric("Dismissed", metrics["dismissed"])
+    m2.metric("Critical / Major", metrics["critical"] + metrics["major"], delta="Action Required" if (metrics["critical"] + metrics["major"]) > 0 else None, delta_color="inverse")
+    m3.metric("⏳ Pending", action_counts["pending"])
+    m4.metric("✅ Confirmed", action_counts["confirmed"])
+    m5.metric("🚫 Dismissed", action_counts["dismissed"])
 
     # 2. Top section "Needs Your Attention": top 3 most critical issues
     st.divider()
     st.markdown("### 🚨 Needs Your Attention")
-    st.caption("Top 3 most critical issues sorted by High severity first, then Open status, then Contradiction category:")
+    st.caption("Top 3 most critical issues sorted by Critical/Major severity first, then Open status, then Contradiction category:")
 
     top_3 = services.get_top_critical_issues(result.issues, limit=3)
 
@@ -379,7 +407,7 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
                 is_conf = getattr(iss, "reviewer_decision", None) == "Confirmed"
                 is_dism = getattr(iss, "reviewer_decision", None) == "Dismissed"
 
-                border_color = "#dc2626" if iss.severity == "High" else ("#ea580c" if iss.severity == "Medium" else "#16a34a")
+                border_color = "#dc2626" if iss.severity in ("Critical", "High") else ("#ea580c" if iss.severity in ("Major", "Medium") else "#16a34a")
                 
                 decision_badge = ""
                 if is_dism:
@@ -389,37 +417,41 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
                 else:
                     decision_badge = "<span style='background: #1e3a8a; color: #bfdbfe; padding: 2px 6px; border-radius: 4px; font-size: 0.72rem;'>⏳ Pending</span>"
 
+                page_ref = iss.page_number or iss.evidence_page or "N/A"
+                quote_text = iss.quote or iss.evidence_text or "N/A"
+
                 st.markdown(
                     f"""
-                    <div style='border: 2px solid {border_color}; border-radius: 8px; padding: 14px; background: rgba(15, 23, 42, 0.7); min-height: 290px; margin-bottom: 10px;'>
+                    <div style='border: 2px solid {border_color}; border-radius: 8px; padding: 14px; background: rgba(15, 23, 42, 0.7); min-height: 310px; margin-bottom: 10px;'>
                         <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;'>
-                            <span style='font-size: 0.8rem; font-weight: bold; color: #94a3b8;'>TOP #{idx+1} CRITICAL</span>
+                            <span style='font-size: 0.8rem; font-weight: bold; color: #94a3b8;'>TOP #{idx+1} PRIORITY</span>
                             <span style='background: {border_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold;'>{iss.severity.upper()}</span>
                         </div>
                         <p style='margin: 0; font-size: 0.95rem; font-weight: bold; color: #f8fafc;'>{iss.category} &nbsp; {decision_badge}</p>
-                        <p style='color: #60a5fa; font-size: 0.8rem; margin: 4px 0 8px 0;'>📍 Page: {iss.evidence_page or 'N/A'}</p>
-                        <p style='color: #e2e8f0; font-size: 0.85rem; margin-bottom: 8px; line-height: 1.3;'><b>Description:</b> {iss.description}</p>
-                        <p style='color: #94a3b8; font-size: 0.8rem; font-style: italic; margin-bottom: 8px; line-height: 1.3;'><b>Evidence:</b> \"{iss.evidence_text or 'N/A'}\"</p>
+                        <p style='color: #38bdf8; font-size: 0.8rem; margin: 4px 0 2px 0;'>🎯 <b>Confidence:</b> {iss.confidence or 'Medium'} &nbsp;|&nbsp; 📍 <b>Page:</b> {page_ref}</p>
+                        <p style='color: #e2e8f0; font-size: 0.85rem; margin-bottom: 6px; line-height: 1.3;'><b>Description:</b> {iss.description}</p>
+                        <p style='color: #cbd5e1; font-size: 0.8rem; font-style: italic; margin-bottom: 6px; line-height: 1.3; background: rgba(30, 41, 59, 0.6); padding: 4px 6px; border-radius: 4px;'><b>Exact Quote (≤25 words):</b> \"{quote_text}\"</p>
                     </div>
                     """,
                     unsafe_allow_html=True
                 )
+                top_comment = st.text_input("Reviewer Comment (optional):", value=getattr(iss, "reviewer_comment", "") or "", key=f"top_cmt_{iss.id}_{idx}")
                 c_btn1, c_btn2 = st.columns(2)
                 with c_btn1:
                     if st.button("✅ Confirm", key=f"top_conf_{iss.id}_{idx}", type="primary" if is_conf else "secondary", use_container_width=True):
-                        services.update_issue_decision(iss, "Confirmed")
+                        services.save_reviewer_action(iss, "Confirmed", top_comment, result)
                         st.rerun()
                 with c_btn2:
                     if st.button("❌ Dismiss", key=f"top_dism_{iss.id}_{idx}", use_container_width=True):
-                        services.update_issue_decision(iss, "Dismissed")
+                        services.save_reviewer_action(iss, "Dismissed", top_comment, result)
                         st.rerun()
 
-    # 3. Filters: severity (High / Medium / Low / All), status (Open / Resolved / All), category
+    # 3. Filters: severity (Critical / Major / Minor / All), status (Open / Resolved / All), category
     st.divider()
     st.markdown("### 🔍 Filters")
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
-        filter_sev = st.selectbox("Severity:", ["All", "High", "Medium", "Low"], key="prio_filter_sev")
+        filter_sev = st.selectbox("Severity:", ["All", "Critical", "Major", "Minor"], key="prio_filter_sev")
     with col_f2:
         filter_status = st.selectbox("Status:", ["All", "Open", "Resolved"], key="prio_filter_status")
     with col_f3:
@@ -441,19 +473,21 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
             if is_dismissed:
                 card_style = "border: 1px solid #475569; background-color: rgba(51, 65, 85, 0.25); opacity: 0.6; border-radius: 8px; padding: 12px; margin-bottom: 10px;"
             else:
-                sev_border = "#dc2626" if iss.severity == "High" else ("#ea580c" if iss.severity == "Medium" else "#16a34a")
-                sev_bg = "rgba(127, 29, 29, 0.12)" if iss.severity == "High" else ("rgba(124, 45, 18, 0.12)" if iss.severity == "Medium" else "rgba(20, 83, 45, 0.12)")
+                sev_border = "#dc2626" if iss.severity in ("Critical", "High") else ("#ea580c" if iss.severity in ("Major", "Medium") else "#16a34a")
+                sev_bg = "rgba(127, 29, 29, 0.12)" if iss.severity in ("Critical", "High") else ("rgba(124, 45, 18, 0.12)" if iss.severity in ("Major", "Medium") else "rgba(20, 83, 45, 0.12)")
                 card_style = f"border-left: 5px solid {sev_border}; border-top: 1px solid #334155; border-right: 1px solid #334155; border-bottom: 1px solid #334155; background-color: {sev_bg}; border-radius: 8px; padding: 12px; margin-bottom: 10px;"
 
             with st.container():
                 st.markdown(f"<div style='{card_style}'>", unsafe_allow_html=True)
-                c_left, c_mid, c_right = st.columns([1.5, 5, 2])
+                c_left, c_mid, c_right = st.columns([1.5, 4.5, 2.5])
                 with c_left:
                     st.markdown(f"**Issue #{idx + 1}**")
-                    sev_color = "red" if iss.severity == "High" else ("orange" if iss.severity == "Medium" else "green")
+                    sev_color = "red" if iss.severity in ("Critical", "High") else ("orange" if iss.severity in ("Major", "Medium") else "green")
                     st.markdown(f":{sev_color}[**{iss.severity} Severity**]")
+                    conf_color = "green" if iss.confidence == "High" else ("orange" if iss.confidence == "Medium" else "blue")
+                    st.markdown(f":{conf_color}[🎯 **{iss.confidence or 'Medium'} Confidence**]")
                     st.caption(f"`{iss.category}`")
-                    st.caption(f"Ref: {iss.evidence_page or 'N/A'}")
+                    st.caption(f"📍 Page: {iss.page_number or iss.evidence_page or 'N/A'}")
                     if is_dismissed:
                         st.markdown("<span style='color: #94a3b8; font-weight: bold;'>🚫 Dismissed<br><small>(Excluded from PDF)</small></span>", unsafe_allow_html=True)
                     elif is_confirmed:
@@ -464,21 +498,29 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
                 with c_mid:
                     desc_color = "#94a3b8" if is_dismissed else "#f8fafc"
                     st.markdown(f"<p style='color: {desc_color}; margin: 0 0 4px 0;'><b>Description:</b> {iss.description}</p>", unsafe_allow_html=True)
-                    if iss.evidence_text:
-                        st.markdown(f"<p style='color: #94a3b8; font-size: 0.85rem; margin: 0 0 4px 0;'><b>Evidence Quote:</b> <i>\"{iss.evidence_text}\"</i></p>", unsafe_allow_html=True)
+                    quote_val = iss.quote or iss.evidence_text
+                    if quote_val:
+                        st.markdown(f"<p style='color: #94a3b8; font-size: 0.85rem; margin: 0 0 4px 0;'><b>Exact Quote (≤25 words):</b> <i>\"{quote_val}\"</i></p>", unsafe_allow_html=True)
                     if iss.follow_up_question:
                         st.markdown(f"<p style='color: #cbd5e1; font-size: 0.85rem; margin: 0 0 4px 0;'><b>Applicant Query:</b> {iss.follow_up_question}</p>", unsafe_allow_html=True)
                     if iss.applicant_reply:
                         st.markdown(f"<p style='color: #67e8f9; font-size: 0.85rem; margin: 0;'><b>Applicant Reply:</b> <i>\"{iss.applicant_reply}\"</i></p>", unsafe_allow_html=True)
+                    if getattr(iss, "reviewer_comment", None):
+                        rev_time = f" <small>({iss.reviewed_at})</small>" if getattr(iss, "reviewed_at", None) else ""
+                        st.markdown(f"<p style='color: #86efac; font-size: 0.85rem; margin: 6px 0 0 0;'><b>Reviewer Note:</b> {iss.reviewer_comment}{rev_time}</p>", unsafe_allow_html=True)
 
                 with c_right:
-                    st.caption("Reviewer Action:")
-                    if st.button("✅ Confirm", key=f"prio_conf_{iss.id}_{idx}", use_container_width=True, type="primary" if is_confirmed else "secondary"):
-                        services.update_issue_decision(iss, "Confirmed")
-                        st.rerun()
-                    if st.button("❌ Dismiss", key=f"prio_dism_{iss.id}_{idx}", use_container_width=True):
-                        services.update_issue_decision(iss, "Dismissed")
-                        st.rerun()
+                    st.caption("Reviewer Action & Optional Comment:")
+                    prio_comment = st.text_input("Comment:", value=getattr(iss, "reviewer_comment", "") or "", key=f"prio_cmt_{iss.id}_{idx}", placeholder="Optional note/reason...")
+                    c_act1, c_act2 = st.columns(2)
+                    with c_act1:
+                        if st.button("✅ Confirm", key=f"prio_conf_{iss.id}_{idx}", use_container_width=True, type="primary" if is_confirmed else "secondary"):
+                            services.save_reviewer_action(iss, "Confirmed", prio_comment, result)
+                            st.rerun()
+                    with c_act2:
+                        if st.button("❌ Dismiss", key=f"prio_dism_{iss.id}_{idx}", use_container_width=True):
+                            services.save_reviewer_action(iss, "Dismissed", prio_comment, result)
+                            st.rerun()
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -521,21 +563,109 @@ else:
                 st.session_state["auth_page"] = "reviewer_priority"
                 st.rerun()
     
-    # 1. Metric: Completeness Score & Counts
-    m1, m2, m3 = st.columns(3)
+    # 1. Statutory Clearance Readiness Score Calculation & Live Display
+    services.refresh_review_readiness(result)
+    r_score = result.readiness_score if result.readiness_score is not None else result.completeness_score
+    r_band = result.readiness_band or ("High" if r_score >= 85 else ("Moderate" if r_score >= 65 else ("Low" if r_score >= 40 else "Very low")))
+    r_low = result.readiness_range_low if result.readiness_range_low is not None else r_score
+    r_high = result.readiness_range_high if result.readiness_range_high is not None else r_score
+
+    band_styles = {
+        "High": {"border": "#16a34a", "bg": "rgba(22, 101, 52, 0.2)", "badge": "#166534", "text": "#4ade80"},
+        "Moderate": {"border": "#2563eb", "bg": "rgba(30, 58, 138, 0.2)", "badge": "#1e3a8a", "text": "#60a5fa"},
+        "Low": {"border": "#ea580c", "bg": "rgba(124, 45, 18, 0.2)", "badge": "#9a3412", "text": "#fb923c"},
+        "Very low": {"border": "#dc2626", "bg": "rgba(127, 29, 29, 0.2)", "badge": "#991b1b", "text": "#f87171"},
+    }
+    b_style = band_styles.get(r_band, band_styles["Moderate"])
+
+    st.markdown(
+        f"""
+        <div style='border: 2px solid {b_style["border"]}; background: {b_style["bg"]}; border-radius: 10px; padding: 18px 24px; margin-bottom: 16px;'>
+            <div style='display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;'>
+                <div>
+                    <span style='font-size: 0.8rem; font-weight: bold; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8;'>
+                        Statutory Compliance Appraisal &bull; MoEFCC / EAC Benchmark
+                    </span>
+                    <h2 style='margin: 4px 0 0 0; font-size: 1.85rem; color: #f8fafc;'>
+                        Clearance Readiness Score
+                    </h2>
+                </div>
+                <div style='text-align: right;'>
+                    <span style='font-size: 2.5rem; font-weight: 900; color: {b_style["text"]};'>{r_score}%</span>
+                    <span style='background: {b_style["badge"]}; color: white; padding: 4px 10px; border-radius: 6px; font-size: 0.85rem; font-weight: bold; margin-left: 10px;'>
+                        {r_band.upper()} BAND
+                    </span>
+                    <p style='color: #cbd5e1; font-size: 0.85rem; margin: 4px 0 0 0;'>
+                        Estimated Range: <b>[{r_low}% &ndash; {r_high}%]</b>
+                    </p>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Category counts: Critical, Major, Minor rule breakdowns
+    cc = result.readiness_category_counts or {}
+    crit_c = cc.get("Critical", {"pass": 0, "partial": 0, "fail": 0, "not_found": 0, "total": 6})
+    maj_c = cc.get("Major", {"pass": 0, "partial": 0, "fail": 0, "not_found": 0, "total": 8})
+    min_c = cc.get("Minor", {"pass": 0, "partial": 0, "fail": 0, "not_found": 0, "total": 4})
+
+    col_cat1, col_cat2, col_cat3 = st.columns(3)
+    with col_cat1:
+        st.markdown(
+            f"<div style='background: rgba(15, 23, 42, 0.6); padding: 8px 12px; border-radius: 6px; border-left: 4px solid #dc2626; margin-bottom: 10px;'>"
+            f"<b>Critical Rules (Weight 3)</b><br>"
+            f"<span style='font-size: 0.85rem; color: #cbd5e1;'>✅ {crit_c.get('pass', 0)} Pass &nbsp;|&nbsp; ⚠️ {crit_c.get('partial', 0)} Partial &nbsp;|&nbsp; ❌ {crit_c.get('fail', 0)} Fail &nbsp;|&nbsp; ❓ {crit_c.get('not_found', 0)} Missing</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with col_cat2:
+        st.markdown(
+            f"<div style='background: rgba(15, 23, 42, 0.6); padding: 8px 12px; border-radius: 6px; border-left: 4px solid #ea580c; margin-bottom: 10px;'>"
+            f"<b>Major Rules (Weight 2)</b><br>"
+            f"<span style='font-size: 0.85rem; color: #cbd5e1;'>✅ {maj_c.get('pass', 0)} Pass &nbsp;|&nbsp; ⚠️ {maj_c.get('partial', 0)} Partial &nbsp;|&nbsp; ❌ {maj_c.get('fail', 0)} Fail &nbsp;|&nbsp; ❓ {maj_c.get('not_found', 0)} Missing</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with col_cat3:
+        st.markdown(
+            f"<div style='background: rgba(15, 23, 42, 0.6); padding: 8px 12px; border-radius: 6px; border-left: 4px solid #16a34a; margin-bottom: 10px;'>"
+            f"<b>Minor Rules (Weight 1)</b><br>"
+            f"<span style='font-size: 0.85rem; color: #cbd5e1;'>✅ {min_c.get('pass', 0)} Pass &nbsp;|&nbsp; ⚠️ {min_c.get('partial', 0)} Partial &nbsp;|&nbsp; ❌ {min_c.get('fail', 0)} Fail &nbsp;|&nbsp; ❓ {min_c.get('not_found', 0)} Missing</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+    # Top 3 Improvements
+    if getattr(result, "readiness_improvements", None):
+        with st.expander("📈 To Improve Your Score (Top 3 Potential Gains)", expanded=True):
+            for imp in result.readiness_improvements[:3]:
+                badge_bg = "#7f1d1d" if imp["category"] == "Critical" else ("#7c2d12" if imp["category"] == "Major" else "#14532d")
+                st.markdown(
+                    f"• <span style='background: {badge_bg}; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: bold;'>{imp['category']}</span> "
+                    f"<b>{imp['rule_name']}</b> &mdash; <span style='color: #4ade80; font-weight: bold;'>+{imp['score_gain']}% Gain</span>: "
+                    f"<i>{imp['recommendation']}</i>",
+                    unsafe_allow_html=True
+                )
+
+    # Mandatory Legal Disclaimer
+    st.info("ℹ️ **Disclaimer:** Indicative estimate based on rule compliance. Final decision rests with EAC/SEAC.")
+
+    # 2. Secondary Metrics: Completeness Score, Deficiencies & Reviewer Decision Counts
+    action_counts = services.get_reviewer_action_counts(result.issues)
+    m1, m2, m3, m4, m5 = st.columns(5)
     with m1:
-        score = result.completeness_score
-        if score >= 80:
-            delta_label = "High Compliance"
-        elif score >= 50:
-            delta_label = "Moderate Gaps"
-        else:
-            delta_label = "Critical Deficiencies"
-        st.metric(label="Completeness Score", value=f"{score}%", delta=delta_label)
+        comp_val = result.completeness_score
+        st.metric(label="Completeness", value=f"{comp_val}%")
     with m2:
-        st.metric(label="Missing Mandatory Studies", value=f"{len(result.missing_studies)}")
+        st.metric(label="Missing Studies", value=f"{len(result.missing_studies)}")
     with m3:
-        st.metric(label="Flagged Discrepancies & Contradictions", value=f"{len(result.issues)}")
+        st.metric(label="Flagged Issues", value=f"{len(result.issues)}")
+    with m4:
+        st.metric(label="✅ Confirmed", value=action_counts["confirmed"])
+    with m5:
+        st.metric(label="🚫 Dismissed", value=action_counts["dismissed"], delta=f"{action_counts['pending']} Pending", delta_color="off")
 
     # 2. Executive Summary
     st.markdown("### 📋 Executive Summary")
@@ -564,23 +694,53 @@ else:
     else:
         st.success("✅ All mandatory checklist studies are addressed in the application.")
 
+    # 3b. 18 Statutory EC Rules Appraisal Breakdown
+    if getattr(result, "rule_results", None):
+        with st.expander(f"📜 18 Statutory EC Rules Appraisal Breakdown ({len(result.rule_results)} rules evaluated)", expanded=False):
+            st.caption("Detailed appraisal per MoEFCC EIA Notification (2006) and EAC statutory guidelines:")
+            for r in result.rule_results:
+                r_status = getattr(r, "status", "not_found")
+                r_name = getattr(r, "rule_name", "")
+                r_id = getattr(r, "rule_id", "")
+                r_cat = getattr(r, "category", "")
+                r_w = getattr(r, "weight", 1)
+                r_reason = getattr(r, "reason", "")
+                r_page = getattr(r, "page_number", "")
+                r_quote = getattr(r, "quote", "")
+
+                status_badge = "✅ Pass" if r_status == "pass" else ("⚠️ Partial" if r_status == "partial" else ("❌ Fail" if r_status == "fail" else "❓ Not Found"))
+                st.markdown(f"**[{r_id}] {r_name}** (`{r_cat}` &bull; Weight {r_w}) &mdash; **{status_badge}**")
+                st.write(f"&rarr; {r_reason}")
+                if r_quote:
+                    st.caption(f"📍 {r_page or 'Document'} &bull; *\"{r_quote}\"*")
+                st.markdown("<div style='margin-bottom: 8px;'></div>", unsafe_allow_html=True)
+
     # 4. Color-coded Issues Table (Pandas)
     st.markdown("### 🔍 Issues, Figures Inconsistencies & Contradictions")
     if result.issues:
         table_data = services.format_issues_table_data(result.issues)
         df = pd.DataFrame(table_data)
 
-        # High red, Medium orange, Low green
+        # Critical red, Major orange, Minor green
         def color_severity(val):
-            if val == "High":
+            if val in ("Critical", "High"):
                 return "background-color: #7f1d1d; color: #fecaca; font-weight: bold;"
-            elif val == "Medium":
+            elif val in ("Major", "Medium"):
                 return "background-color: #7c2d12; color: #fed7aa; font-weight: bold;"
-            elif val == "Low":
+            elif val in ("Minor", "Low"):
                 return "background-color: #14532d; color: #bbf7d0; font-weight: bold;"
             return ""
 
-        styled_df = df.style.map(color_severity, subset=["Severity"])
+        def color_confidence(val):
+            if val == "High":
+                return "color: #4ade80; font-weight: bold;"
+            elif val == "Medium":
+                return "color: #facc15; font-weight: bold;"
+            elif val == "Low":
+                return "color: #94a3b8;"
+            return ""
+
+        styled_df = df.style.map(color_severity, subset=["Severity"]).map(color_confidence, subset=["Confidence"])
         st.dataframe(styled_df, use_container_width=True, hide_index=True)
     else:
         st.success("🎉 No internal discrepancies or contradictions found in the submitted report.")
@@ -631,11 +791,15 @@ else:
             with st.container(border=True):
                 col_badge, col_meta = st.columns([1, 4])
                 with col_badge:
-                    sev_color = "red" if issue.severity == "High" else ("orange" if issue.severity == "Medium" else "green")
+                    sev = issue.severity
+                    sev_color = "red" if sev in ("Critical", "High") else ("orange" if sev in ("Major", "Medium") else "green")
                     st.markdown(f"**Issue #{idx + 1}**")
-                    st.markdown(f":{sev_color}[**{issue.severity} Severity**]")
+                    st.markdown(f":{sev_color}[**{sev} Severity**]")
+                    conf = issue.confidence or "Medium"
+                    conf_color = "green" if conf == "High" else ("orange" if conf == "Medium" else "blue")
+                    st.markdown(f":{conf_color}[🎯 **{conf} Confidence**]")
                     st.caption(f"`{issue.category}`")
-                    st.caption(f"Ref: {issue.evidence_page or 'N/A'}")
+                    st.caption(f"📍 Page: {issue.page_number or issue.evidence_page or 'N/A'}")
                     if issue.status == "Still Open":
                         st.badge("Still Open", color="red")
                     elif issue.status == "Needs More Info":
@@ -645,8 +809,11 @@ else:
 
                 with col_meta:
                     st.markdown(f"**Description:** {issue.description}")
-                    if issue.evidence_text:
-                        st.markdown(f"**Evidence Cited:** *\"{issue.evidence_text}\"*")
+                    quote_val = issue.quote or issue.evidence_text
+                    if quote_val:
+                        st.markdown(f"**Exact Quote (≤25 words):** *\"{quote_val}\"*")
+                    if getattr(issue, "reviewer_comment", None):
+                        st.info(f"📌 **Reviewer Note:** {issue.reviewer_comment}")
                     
                     st.markdown(
                         f"""

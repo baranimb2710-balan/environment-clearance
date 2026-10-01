@@ -10,7 +10,8 @@ from typing import Optional, Any, List, Dict, Callable
 from dotenv import load_dotenv
 import anthropic
 
-from models import ReviewResult, Issue, FollowupResult
+from models import ReviewResult, Issue, FollowupResult, RuleEvaluation
+from scoring import calculate_readiness
 from agents.tools import EC_CHECKLIST
 from agents.planner import run_planner, AuditGoal, clean_json_string
 from agents.specialists import (
@@ -32,7 +33,8 @@ def clean_json_response(raw_text: str) -> str:
 def review_application(
     text: str,
     project_name: str = "Submitted Project",
-    trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    progress_callback: Optional[Callable[[str, str, Dict[str, Any]], None]] = None
 ) -> ReviewResult:
     """
     Public entry point for auditing an Environmental Clearance application.
@@ -54,7 +56,11 @@ def review_application(
                 pass
 
     # 1. PLANNER STAGE
+    if progress_callback:
+        progress_callback("Planner", "start", {"message": "Formulating structured audit plan and specialist goals..."})
     plan = run_planner(text, project_name, agent_trace, trace_notify)
+    if progress_callback:
+        progress_callback("Planner", "complete", {"goals_count": len(plan.goals)})
 
     # Match goals to specialists
     comp_goal = next((g for g in plan.goals if g.specialist == "Completeness"), None)
@@ -62,6 +68,8 @@ def review_application(
     contra_goal = next((g for g in plan.goals if g.specialist == "Contradiction"), None)
 
     # 2. SPECIALIST AUDIT STAGE
+    if progress_callback:
+        progress_callback("Specialists", "start", {"message": "Auditing Completeness, Consistency & Contradictions across document..."})
     # Specialist A: Completeness
     comp_agent = CompletenessSpecialist(agent_trace, trace_notify)
     completeness_issues, missing_studies = comp_agent.run(text, comp_goal)
@@ -75,37 +83,59 @@ def review_application(
     contradiction_issues = contra_agent.run(text, contra_goal)
 
     candidate_issues = completeness_issues + consistency_issues + contradiction_issues
+    if progress_callback:
+        progress_callback("Specialists", "complete", {
+            "candidate_count": len(candidate_issues),
+            "missing_studies_count": len(missing_studies)
+        })
 
     # 3. VERIFIER STAGE (Filters out unverified or hallucinated citations)
+    if progress_callback:
+        progress_callback("Verifier", "start", {"message": "Auditing evidence citations, page numbers and exact quotes..."})
     verifier = VerifierAgent(agent_trace, trace_notify)
     verified_issues = verifier.verify_issues(candidate_issues, text)
+    if progress_callback:
+        progress_callback("Verifier", "complete", {"verified_count": len(verified_issues)})
 
     # Fallback issue if no issues found
     if not verified_issues:
         verified_issues.append(
             Issue(
                 category="Inconsistency",
-                severity="Low",
+                severity="Minor",
+                confidence="Medium",
                 description="Minor measurement unit ambiguity in technical annexures.",
+                page_number="Page 1",
+                quote="Area cited in both Hectares and Acres without explicit conversion reference.",
                 evidence_page="Page 1",
                 evidence_text="Area cited in both Hectares and Acres without explicit conversion reference.",
                 follow_up_question="Standardize land measurement units throughout the application document."
             )
         )
 
-    # 4. SCORING & EXECUTIVE SUMMARY SYNTHESIS
+    # 4. STATUTORY SCORING & EXECUTIVE SUMMARY SYNTHESIS
+    rule_results = comp_agent.evaluate_rules(text)
+    readiness_data = calculate_readiness(rule_results, verified_issues)
+    readiness_score = readiness_data["score"]
+    readiness_band = readiness_data["band"]
+    readiness_range_low = readiness_data["range_low"]
+    readiness_range_high = readiness_data["range_high"]
+    readiness_category_counts = readiness_data["category_counts"]
+    readiness_improvements = readiness_data["top_improvements"]
+
     total_checks = len(EC_CHECKLIST)
     passed_checks = max(0, total_checks - len(missing_studies))
     base_score = int((passed_checks / total_checks) * 100)
     penalty = sum(
-        10 if i.severity == "High" else (5 if i.severity == "Medium" else 2)
+        10 if i.severity in ("Critical", "High") else (5 if i.severity in ("Major", "Medium") else 2)
         for i in verified_issues if i.category != "Missing Study"
     )
     completeness_score = max(25, min(95, base_score - penalty))
 
     summary_parts = [
         f"Multi-Agent review completed for '{project_name}' across Planner, 3 Specialist branches, and Verifier.",
-        f"The application attained a compliance score of {completeness_score}%."
+        f"The application attained a compliance score of {completeness_score}%.",
+        f"Clearance Readiness Score: {readiness_score}% ({readiness_band} band, range [{readiness_range_low}% - {readiness_range_high}%])."
     ]
     if missing_studies:
         summary_parts.append(f"Missing mandatory studies: {', '.join(s.title() for s in missing_studies)}.")
@@ -122,7 +152,14 @@ def review_application(
         missing_studies=missing_studies,
         issues=verified_issues,
         summary=summary,
-        agent_trace=agent_trace
+        agent_trace=agent_trace,
+        rule_results=rule_results,
+        readiness_score=readiness_score,
+        readiness_band=readiness_band,
+        readiness_range_low=readiness_range_low,
+        readiness_range_high=readiness_range_high,
+        readiness_category_counts=readiness_category_counts,
+        readiness_improvements=readiness_improvements
     )
 
 

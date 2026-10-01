@@ -97,13 +97,23 @@ def init_db():
             )
             """
         )
-        # Automatic migration: ensure owner_username and missing_studies columns exist
+        # Automatic migration: ensure owner_username, missing_studies, and readiness columns exist
         cursor.execute("PRAGMA table_info(applications)")
         app_cols = [row[1] for row in cursor.fetchall()]
         if "owner_username" not in app_cols:
             cursor.execute("ALTER TABLE applications ADD COLUMN owner_username TEXT DEFAULT 'admin'")
         if "missing_studies" not in app_cols:
             cursor.execute("ALTER TABLE applications ADD COLUMN missing_studies TEXT")
+        if "readiness_score" not in app_cols:
+            cursor.execute("ALTER TABLE applications ADD COLUMN readiness_score INTEGER")
+        if "readiness_band" not in app_cols:
+            cursor.execute("ALTER TABLE applications ADD COLUMN readiness_band TEXT")
+        if "readiness_range_low" not in app_cols:
+            cursor.execute("ALTER TABLE applications ADD COLUMN readiness_range_low INTEGER")
+        if "readiness_range_high" not in app_cols:
+            cursor.execute("ALTER TABLE applications ADD COLUMN readiness_range_high INTEGER")
+        if "rule_results" not in app_cols:
+            cursor.execute("ALTER TABLE applications ADD COLUMN rule_results TEXT")
 
         # 4. Follow-ups table with Foreign Key ON DELETE CASCADE
         cursor.execute(
@@ -113,7 +123,10 @@ def init_db():
                 project_name TEXT NOT NULL,
                 category TEXT,
                 severity TEXT,
+                confidence TEXT DEFAULT 'Medium',
                 description TEXT,
+                page_number TEXT,
+                quote TEXT,
                 evidence_page TEXT,
                 evidence_text TEXT,
                 follow_up_question TEXT,
@@ -121,16 +134,33 @@ def init_db():
                 applicant_reply TEXT,
                 ai_reason TEXT,
                 reviewer_decision TEXT DEFAULT 'Pending',
+                reviewer_comment TEXT,
+                reviewed_at TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_name) REFERENCES applications(project_name) ON DELETE CASCADE
             )
             """
         )
-        # Automatic migration: ensure reviewer_decision column exists
+        # Automatic safe migration: add columns using ALTER TABLE ADD COLUMN without dropping data
         cursor.execute("PRAGMA table_info(followups)")
         followup_cols = [row[1] for row in cursor.fetchall()]
         if "reviewer_decision" not in followup_cols:
             cursor.execute("ALTER TABLE followups ADD COLUMN reviewer_decision TEXT DEFAULT 'Pending'")
+        if "confidence" not in followup_cols:
+            cursor.execute("ALTER TABLE followups ADD COLUMN confidence TEXT DEFAULT 'Medium'")
+        if "page_number" not in followup_cols:
+            cursor.execute("ALTER TABLE followups ADD COLUMN page_number TEXT")
+        if "quote" not in followup_cols:
+            cursor.execute("ALTER TABLE followups ADD COLUMN quote TEXT")
+        if "reviewer_comment" not in followup_cols:
+            cursor.execute("ALTER TABLE followups ADD COLUMN reviewer_comment TEXT")
+        if "reviewed_at" not in followup_cols:
+            cursor.execute("ALTER TABLE followups ADD COLUMN reviewed_at TIMESTAMP")
+
+        # Backfill existing records if page_number, quote, or confidence are NULL
+        cursor.execute("UPDATE followups SET page_number = evidence_page WHERE (page_number IS NULL OR page_number = '') AND evidence_page IS NOT NULL")
+        cursor.execute("UPDATE followups SET quote = evidence_text WHERE (quote IS NULL OR quote = '') AND evidence_text IS NOT NULL")
+        cursor.execute("UPDATE followups SET confidence = 'Medium' WHERE confidence IS NULL OR confidence = ''")
 
         # Ensure foreign key constraint is present on existing followups table
         cursor.execute("PRAGMA foreign_key_list(followups)")
@@ -145,7 +175,10 @@ def init_db():
                     project_name TEXT NOT NULL,
                     category TEXT,
                     severity TEXT,
+                    confidence TEXT DEFAULT 'Medium',
                     description TEXT,
+                    page_number TEXT,
+                    quote TEXT,
                     evidence_page TEXT,
                     evidence_text TEXT,
                     follow_up_question TEXT,
@@ -153,6 +186,8 @@ def init_db():
                     applicant_reply TEXT,
                     ai_reason TEXT,
                     reviewer_decision TEXT DEFAULT 'Pending',
+                    reviewer_comment TEXT,
+                    reviewed_at TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (project_name) REFERENCES applications(project_name) ON DELETE CASCADE
                 )
@@ -161,14 +196,16 @@ def init_db():
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO followups_migrated (
-                    issue_id, project_name, category, severity, description,
-                    evidence_page, evidence_text, follow_up_question, status,
-                    applicant_reply, ai_reason, reviewer_decision, updated_at
+                    issue_id, project_name, category, severity, confidence, description,
+                    page_number, quote, evidence_page, evidence_text, follow_up_question, status,
+                    applicant_reply, ai_reason, reviewer_decision, reviewer_comment, reviewed_at, updated_at
                 )
                 SELECT 
-                    issue_id, project_name, category, severity, description,
+                    issue_id, project_name, category, severity, COALESCE(confidence, 'Medium'), description,
+                    COALESCE(page_number, evidence_page), COALESCE(quote, evidence_text),
                     evidence_page, evidence_text, follow_up_question, status,
-                    applicant_reply, ai_reason, COALESCE(reviewer_decision, 'Pending'), updated_at
+                    applicant_reply, ai_reason, COALESCE(reviewer_decision, 'Pending'),
+                    reviewer_comment, reviewed_at, updated_at
                 FROM followups
                 """
             )
@@ -305,7 +342,7 @@ def create_user(username: str, name: str, email: str, plain_password: str, role:
 def sync_review_issues(project_name: str, issues: List[Any]) -> List[Any]:
     """
     Synchronizes in-memory review issues with the SQLite followups table.
-    Preserves existing applicant replies, AI reasons, and statuses.
+    Preserves existing applicant replies, AI reasons, reviewer decisions, comments, and statuses.
     Uses content-addressed stable hashing to avoid index drift.
     """
     clean_pname = project_name.strip()
@@ -315,32 +352,57 @@ def sync_review_issues(project_name: str, issues: List[Any]) -> List[Any]:
             if not getattr(issue, "id", None):
                 # Content-addressed stable hash (independent of list order)
                 raw_hash = hashlib.sha256(
-                    f"{clean_pname}_{issue.description}_{issue.category}_{getattr(issue, 'evidence_page', '') or ''}".encode()
+                    f"{clean_pname}_{issue.description}_{issue.category}_{getattr(issue, 'evidence_page', '') or ''}_{getattr(issue, 'page_number', '') or ''}".encode()
                 ).hexdigest()[:12]
                 issue.id = f"iss_{raw_hash}"
 
-            cursor.execute("SELECT status, applicant_reply, ai_reason, reviewer_decision FROM followups WHERE issue_id = ?", (issue.id,))
+            cursor.execute(
+                """
+                SELECT status, applicant_reply, ai_reason, reviewer_decision,
+                       reviewer_comment, reviewed_at, page_number, quote, confidence
+                FROM followups WHERE issue_id = ?
+                """,
+                (issue.id,)
+            )
             row = cursor.fetchone()
             if row:
                 issue.status = row["status"]
                 issue.applicant_reply = row["applicant_reply"]
                 issue.ai_reason = row["ai_reason"]
                 issue.reviewer_decision = row["reviewer_decision"] or "Pending"
+                if "reviewer_comment" in row.keys() and row["reviewer_comment"]:
+                    issue.reviewer_comment = row["reviewer_comment"]
+                if "reviewed_at" in row.keys() and row["reviewed_at"]:
+                    issue.reviewed_at = str(row["reviewed_at"])
+                if "page_number" in row.keys() and row["page_number"]:
+                    issue.page_number = row["page_number"]
+                    issue.evidence_page = row["page_number"]
+                if "quote" in row.keys() and row["quote"]:
+                    issue.quote = row["quote"]
+                    issue.evidence_text = row["quote"]
+                if "confidence" in row.keys() and row["confidence"]:
+                    issue.confidence = row["confidence"]
             else:
                 decision = getattr(issue, "reviewer_decision", "Pending") or "Pending"
+                p_num = getattr(issue, "page_number", None) or getattr(issue, "evidence_page", None)
+                q_text = getattr(issue, "quote", None) or getattr(issue, "evidence_text", None)
+                conf = getattr(issue, "confidence", "Medium") or "Medium"
+                r_comment = getattr(issue, "reviewer_comment", None)
+                r_at = getattr(issue, "reviewed_at", None)
+
                 cursor.execute(
                     """
                     INSERT INTO followups (
-                        issue_id, project_name, category, severity, description,
-                        evidence_page, evidence_text, follow_up_question, status,
-                        applicant_reply, ai_reason, reviewer_decision
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        issue_id, project_name, category, severity, confidence, description,
+                        page_number, quote, evidence_page, evidence_text, follow_up_question,
+                        status, applicant_reply, ai_reason, reviewer_decision, reviewer_comment, reviewed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        issue.id, clean_pname, issue.category, issue.severity,
-                        issue.description, issue.evidence_page, issue.evidence_text,
+                        issue.id, clean_pname, issue.category, issue.severity, conf,
+                        issue.description, p_num, q_text, p_num, q_text,
                         issue.follow_up_question, issue.status, issue.applicant_reply,
-                        issue.ai_reason, decision
+                        issue.ai_reason, decision, r_comment, r_at
                     )
                 )
     return issues
@@ -365,23 +427,99 @@ def update_issue_followup(issue_id: str, status: str, applicant_reply: str, ai_r
         return False
 
 
-def update_reviewer_decision(issue_id: str, decision: str) -> bool:
-    """Updates reviewer_decision ('Confirmed' or 'Dismissed') for an issue in SQLite."""
+def recalculate_project_readiness(project_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Recalculates the Clearance Readiness Score from stored rule_results and current followups.
+    Updates the applications table with the recalculated score, band, and range.
+    """
+    clean_pname = project_name.strip()
+    try:
+        from scoring import calculate_readiness
+        with db_session() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT rule_results FROM applications WHERE project_name = ?",
+                (clean_pname,)
+            )
+            app_row = cursor.fetchone()
+            if not app_row:
+                return None
+            
+            raw_rules = app_row["rule_results"]
+            rule_evals = json.loads(raw_rules) if raw_rules else []
+            
+            # Fetch all followups
+            cursor.execute(
+                "SELECT * FROM followups WHERE project_name = ?",
+                (clean_pname,)
+            )
+            issues = [dict(r) for r in cursor.fetchall()]
+            
+            readiness_data = calculate_readiness(rule_evals, issues)
+            
+            cursor.execute(
+                """
+                UPDATE applications
+                SET readiness_score = ?,
+                    readiness_band = ?,
+                    readiness_range_low = ?,
+                    readiness_range_high = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE project_name = ?
+                """,
+                (
+                    readiness_data["score"],
+                    readiness_data["band"],
+                    readiness_data["range_low"],
+                    readiness_data["range_high"],
+                    clean_pname
+                )
+            )
+            return readiness_data
+    except Exception as e:
+        print(f"Error recalculating readiness for {project_name}: {e}")
+        return None
+
+
+def update_reviewer_action(issue_id: str, decision: str, comment: Optional[str] = None) -> bool:
+    """
+    Updates reviewer_decision ('Confirmed' or 'Dismissed'), optional reviewer_comment,
+    and reviewed_at timestamp for an issue in SQLite.
+    Automatically triggers recalculation of the project's Clearance Readiness Score.
+    """
+    project_name = None
     try:
         with db_session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE followups
-                SET reviewer_decision = ?, updated_at = CURRENT_TIMESTAMP
+                SET reviewer_decision = ?,
+                    reviewer_comment = CASE WHEN ? IS NOT NULL AND ? != '' THEN ? ELSE reviewer_comment END,
+                    reviewed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE issue_id = ?
                 """,
-                (decision, issue_id)
+                (decision, comment, comment, comment, issue_id)
             )
-            return True
+            # Find project_name
+            cursor.execute("SELECT project_name FROM followups WHERE issue_id = ?", (issue_id,))
+            p_row = cursor.fetchone()
+            if p_row and p_row["project_name"]:
+                project_name = p_row["project_name"]
+
+        # Recalculate AFTER the previous transaction commits and releases lock
+        if project_name:
+            recalculate_project_readiness(project_name)
+        return True
     except Exception as e:
-        print(f"Error updating reviewer decision: {e}")
+        print(f"Error updating reviewer action: {e}")
         return False
+
+
+def update_reviewer_decision(issue_id: str, decision: str) -> bool:
+    """Updates reviewer_decision ('Confirmed' or 'Dismissed') for an issue in SQLite."""
+    return update_reviewer_action(issue_id, decision, None)
 
 
 def get_project_followups(project_name: str) -> List[Dict[str, Any]]:
@@ -429,31 +567,60 @@ def store_application_trace(
     completeness_score: Optional[int] = None,
     summary: Optional[str] = None,
     owner_username: Optional[str] = None,
-    missing_studies: Optional[List[str]] = None
+    missing_studies: Optional[List[str]] = None,
+    readiness_score: Optional[int] = None,
+    readiness_band: Optional[str] = None,
+    readiness_range_low: Optional[int] = None,
+    readiness_range_high: Optional[int] = None,
+    rule_results: Optional[Any] = None
 ) -> bool:
     """
     Stores or updates the multi-agent execution trace and metadata for an application in SQLite.
-    Stores agent_trace and missing_studies in applications table as JSON text.
+    Stores agent_trace, missing_studies, and rule_results in applications table as JSON text.
     """
     clean_pname = project_name.strip()
     trace_json = json.dumps(agent_trace) if not isinstance(agent_trace, str) else agent_trace
     missing_json = json.dumps(missing_studies) if missing_studies is not None else None
+    
+    if rule_results is not None:
+        if isinstance(rule_results, str):
+            rules_json = rule_results
+        else:
+            # Convert models to dicts if needed
+            serializable = [r.model_dump() if hasattr(r, "model_dump") else r for r in rule_results]
+            rules_json = json.dumps(serializable)
+    else:
+        rules_json = None
+
     try:
         with db_session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO applications (project_name, owner_username, agent_trace, completeness_score, summary, missing_studies, updated_at)
-                VALUES (?, COALESCE(?, 'admin'), ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO applications (
+                    project_name, owner_username, agent_trace, completeness_score,
+                    summary, missing_studies, readiness_score, readiness_band,
+                    readiness_range_low, readiness_range_high, rule_results, updated_at
+                )
+                VALUES (?, COALESCE(?, 'admin'), ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(project_name) DO UPDATE SET
                     owner_username = COALESCE(excluded.owner_username, applications.owner_username),
                     agent_trace = excluded.agent_trace,
                     completeness_score = COALESCE(excluded.completeness_score, applications.completeness_score),
                     summary = COALESCE(excluded.summary, applications.summary),
                     missing_studies = COALESCE(excluded.missing_studies, applications.missing_studies),
+                    readiness_score = COALESCE(excluded.readiness_score, applications.readiness_score),
+                    readiness_band = COALESCE(excluded.readiness_band, applications.readiness_band),
+                    readiness_range_low = COALESCE(excluded.readiness_range_low, applications.readiness_range_low),
+                    readiness_range_high = COALESCE(excluded.readiness_range_high, applications.readiness_range_high),
+                    rule_results = COALESCE(excluded.rule_results, applications.rule_results),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (clean_pname, owner_username, trace_json, completeness_score, summary, missing_json)
+                (
+                    clean_pname, owner_username, trace_json, completeness_score,
+                    summary, missing_json, readiness_score, readiness_band,
+                    readiness_range_low, readiness_range_high, rules_json
+                )
             )
             return True
     except Exception as e:
@@ -474,3 +641,18 @@ def get_application_trace(project_name: str) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"Error fetching application trace: {e}")
     return []
+
+
+def get_application_record(project_name: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the full application record from the applications table."""
+    clean_pname = project_name.strip()
+    try:
+        with db_session() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM applications WHERE project_name = ?", (clean_pname,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+    except Exception as e:
+        print(f"Error fetching application record: {e}")
+    return None

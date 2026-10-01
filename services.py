@@ -11,7 +11,8 @@ import db
 import extract
 import review
 import report
-from models import Issue, ReviewResult, FollowupResult, UserRole
+from models import Issue, ReviewResult, FollowupResult, UserRole, RuleEvaluation
+from scoring import calculate_readiness
 
 
 # ------------------------------------------------------------------------------
@@ -88,8 +89,8 @@ def sync_project_issues(project_name: str, issues: List[Issue]) -> List[Issue]:
 def load_project_audit(project_name: str) -> Optional[ReviewResult]:
     """
     Loads past audit issues and agent trace from SQLite, reconstitutes
-    Issue models, preserves original completeness score, and builds ReviewResult.
-    Directly retrieves stored missing_studies JSON from database, with fallback.
+    Issue models with evidence quotes and reviewer actions, preserves completeness score,
+    and sorts issues by severity then confidence.
     """
     clean_pname = project_name.strip()
     records = db.get_project_followups(clean_pname)
@@ -103,15 +104,20 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
         iss = Issue(
             id=r["issue_id"],
             category=r["category"] or "Inconsistency",
-            severity=r["severity"] or "Medium",
+            severity=r.get("severity") or "Major",
+            confidence=r.get("confidence") or "Medium",
             description=r["description"] or "",
-            evidence_page=r["evidence_page"],
-            evidence_text=r["evidence_text"],
+            page_number=r.get("page_number") or r.get("evidence_page"),
+            quote=r.get("quote") or r.get("evidence_text"),
+            evidence_page=r.get("evidence_page") or r.get("page_number"),
+            evidence_text=r.get("evidence_text") or r.get("quote"),
             follow_up_question=r["follow_up_question"],
             status=r["status"] or "Open",
             applicant_reply=r["applicant_reply"],
             ai_reason=r["ai_reason"],
-            reviewer_decision=r.get("reviewer_decision", "Pending") or "Pending"
+            reviewer_decision=r.get("reviewer_decision", "Pending") or "Pending",
+            reviewer_comment=r.get("reviewer_comment"),
+            reviewed_at=str(r["reviewed_at"]) if r.get("reviewed_at") else None
         )
         loaded_issues.append(iss)
         if iss.category == "Missing Study":
@@ -119,14 +125,20 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
             if clean_m and clean_m not in missing_st:
                 missing_st.append(clean_m)
 
-    # Fetch stored score, summary, and missing_studies from applications table
+    # Fetch stored score, summary, missing_studies, and rule_results from applications table
     stored_score = None
     stored_summary = None
     stored_missing = None
+    stored_rules: List[RuleEvaluation] = []
     with db.db_session() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT completeness_score, summary, missing_studies FROM applications WHERE project_name = ?",
+            """
+            SELECT completeness_score, summary, missing_studies,
+                   readiness_score, readiness_band, readiness_range_low,
+                   readiness_range_high, rule_results
+            FROM applications WHERE project_name = ?
+            """,
             (clean_pname,)
         )
         app_row = cur.fetchone()
@@ -140,6 +152,13 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
                         stored_missing = parsed
                 except Exception:
                     stored_missing = None
+            if app_row["rule_results"]:
+                try:
+                    raw_r = json.loads(app_row["rule_results"])
+                    if isinstance(raw_r, list):
+                        stored_rules = [RuleEvaluation(**r) for r in raw_r]
+                except Exception:
+                    stored_rules = []
 
     if stored_score is not None:
         final_score = stored_score
@@ -154,28 +173,53 @@ def load_project_audit(project_name: str) -> Optional[ReviewResult]:
     stored_trace = db.get_application_trace(clean_pname)
     final_summary = stored_summary or f"Audit loaded from database for '{clean_pname}'. Contains {len(loaded_issues)} tracked compliance issues."
 
+    # Sort issues by severity then confidence
+    sorted_issues = sort_issues_by_priority(loaded_issues)
+
+    # Calculate statutory readiness score
+    readiness_data = calculate_readiness(stored_rules, sorted_issues)
+
     return ReviewResult(
         project_name=clean_pname,
         completeness_score=final_score,
         missing_studies=final_missing,
-        issues=loaded_issues,
+        issues=sorted_issues,
         summary=final_summary,
-        agent_trace=stored_trace
+        agent_trace=stored_trace,
+        rule_results=stored_rules,
+        readiness_score=readiness_data["score"],
+        readiness_band=readiness_data["band"],
+        readiness_range_low=readiness_data["range_low"],
+        readiness_range_high=readiness_data["range_high"],
+        readiness_category_counts=readiness_data["category_counts"],
+        readiness_improvements=readiness_data["top_improvements"]
     )
 
 
 # ------------------------------------------------------------------------------
-# 3. Application Review Pipeline Orchestration
+# 3. Application Review Pipeline Orchestration (Live 5-Step Progress)
 # ------------------------------------------------------------------------------
+def sort_issues_by_priority(issues: List[Issue]) -> List[Issue]:
+    """
+    Sorts issues primarily by severity (Critical > Major > Minor),
+    and secondarily by confidence (High > Medium > Low).
+    """
+    sev_rank = {"Critical": 0, "High": 0, "Major": 1, "Medium": 1, "Minor": 2, "Low": 2}
+    conf_rank = {"High": 0, "Medium": 1, "Low": 2}
+    return sorted(issues, key=lambda i: (sev_rank.get(i.severity, 1), conf_rank.get(i.confidence, 1)))
+
+
 def process_application_review(
     uploaded_file: Any,
     project_name: str,
     trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    progress_callback: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
     owner_username: Optional[str] = None
 ) -> Tuple[Optional[ReviewResult], Optional[str], Optional[int]]:
     """
     Extracts text from PDF, executes the multi-agent review pipeline,
     persists results to SQLite, and synchronizes issues.
+    Reports progress for 5 distinct stages: Extracting text, Planner, Specialists, Verifier, Saving.
     Returns: (ReviewResult, error_message, total_pages)
     """
     clean_pname = project_name.strip()
@@ -184,35 +228,57 @@ def process_application_review(
     if uploaded_file is None:
         return None, "Please upload a PDF file of the Environmental Clearance report.", None
 
-    # Step 1: Text extraction
+    # Step 1: Extracting text
+    if progress_callback:
+        progress_callback("Extracting text", "start", {"message": "Extracting digital text page-by-page from PDF..."})
     extracted_text, total_pages = extract.extract_text(uploaded_file)
     if not extracted_text:
+        if progress_callback:
+            progress_callback("Extracting text", "error", {"message": "Scanned or image-only PDF detected"})
         return (
             None,
             "⚠️ **Scanned or Image-Only PDF Detected:** The uploaded document contains no extractable digital text. Per system guidelines, OCR is disabled. Please upload a report containing digital selectable text.",
             total_pages
         )
+    if progress_callback:
+        progress_callback("Extracting text", "complete", {"pages": total_pages})
 
-    # Step 2: Multi-agent pipeline execution
+    # Steps 2-4: Planner, Specialists, Verifier
     try:
         review_result = review.review_application(
             extracted_text,
             project_name=clean_pname,
-            trace_callback=trace_callback
+            trace_callback=trace_callback,
+            progress_callback=progress_callback
         )
-        # Store execution trace and metadata in SQLite applications table
+
+        # Step 5: Saving
+        if progress_callback:
+            progress_callback("Saving", "start", {"message": "Storing audit trace, missing studies, and issues in database..."})
         db.store_application_trace(
             project_name=clean_pname,
             agent_trace=review_result.agent_trace,
             completeness_score=review_result.completeness_score,
             summary=review_result.summary,
             owner_username=owner_username,
-            missing_studies=review_result.missing_studies
+            missing_studies=review_result.missing_studies,
+            readiness_score=review_result.readiness_score,
+            readiness_band=review_result.readiness_band,
+            readiness_range_low=review_result.readiness_range_low,
+            readiness_range_high=review_result.readiness_range_high,
+            rule_results=review_result.rule_results
         )
         # Synchronize issues with followups table
         review_result.issues = db.sync_review_issues(clean_pname, review_result.issues)
+        # Sort issues by severity then confidence
+        review_result.issues = sort_issues_by_priority(review_result.issues)
+        if progress_callback:
+            progress_callback("Saving", "complete", {"issues_count": len(review_result.issues)})
+
         return review_result, None, total_pages
     except Exception as e:
+        if progress_callback:
+            progress_callback("Review Pipeline", "error", {"message": str(e)})
         return None, f"Review error: {str(e)}", total_pages
 
 
@@ -221,22 +287,42 @@ def process_application_review(
 # ------------------------------------------------------------------------------
 def calculate_reviewer_metrics(issues: List[Issue]) -> Dict[str, int]:
     """Calculates summary metric counts for reviewer priority triage."""
+    confirmed = sum(1 for i in issues if getattr(i, "reviewer_decision", None) == "Confirmed")
+    dismissed = sum(1 for i in issues if getattr(i, "reviewer_decision", None) == "Dismissed")
+    pending = len(issues) - confirmed - dismissed
     return {
         "total": len(issues),
-        "high": sum(1 for i in issues if i.severity == "High"),
+        "critical": sum(1 for i in issues if i.severity in ("Critical", "High")),
+        "high": sum(1 for i in issues if i.severity in ("Critical", "High")),
+        "major": sum(1 for i in issues if i.severity in ("Major", "Medium")),
+        "minor": sum(1 for i in issues if i.severity in ("Minor", "Low")),
         "open": sum(1 for i in issues if i.status in ("Open", "Still Open")),
-        "confirmed": sum(1 for i in issues if getattr(i, "reviewer_decision", None) == "Confirmed"),
-        "dismissed": sum(1 for i in issues if getattr(i, "reviewer_decision", None) == "Dismissed")
+        "confirmed": confirmed,
+        "dismissed": dismissed,
+        "pending": max(0, pending)
+    }
+
+
+def get_reviewer_action_counts(issues: List[Issue]) -> Dict[str, int]:
+    """Returns counts of confirmed, dismissed, and pending issues."""
+    confirmed = sum(1 for i in issues if getattr(i, "reviewer_decision", None) == "Confirmed")
+    dismissed = sum(1 for i in issues if getattr(i, "reviewer_decision", None) == "Dismissed")
+    pending = len(issues) - confirmed - dismissed
+    return {
+        "confirmed": confirmed,
+        "dismissed": dismissed,
+        "pending": max(0, pending),
+        "total": len(issues)
     }
 
 
 def get_top_critical_issues(issues: List[Issue], limit: int = 3) -> List[Issue]:
     """
-    Ranks issues by High severity first, then Open status, then Contradiction category.
+    Ranks issues by Critical severity first, then Open status, then Contradiction category.
     Prioritizes active/un-dismissed issues and returns the top `limit`.
     """
     def priority_sort_key(iss: Issue) -> Tuple[int, int, int]:
-        sev_rank = {"High": 0, "Medium": 1, "Low": 2}.get(iss.severity, 3)
+        sev_rank = {"Critical": 0, "High": 0, "Major": 1, "Medium": 1, "Minor": 2, "Low": 2}.get(iss.severity, 3)
         status_rank = 0 if iss.status in ("Open", "Still Open") else (1 if iss.status == "Needs More Info" else 2)
         cat_rank = 0 if iss.category == "Contradiction" else (1 if iss.category == "Inconsistency" else 2)
         return (sev_rank, status_rank, cat_rank)
@@ -256,8 +342,15 @@ def filter_issues(
     """Filters issues by severity, resolution status, and category."""
     filtered = []
     for iss in issues:
-        if severity != "All" and iss.severity != severity:
-            continue
+        if severity != "All":
+            if severity == "Critical" and iss.severity not in ("Critical", "High"):
+                continue
+            elif severity == "Major" and iss.severity not in ("Major", "Medium"):
+                continue
+            elif severity == "Minor" and iss.severity not in ("Minor", "Low"):
+                continue
+            elif severity not in ("Critical", "Major", "Minor") and iss.severity != severity:
+                continue
         if status == "Open" and iss.status not in ("Open", "Still Open"):
             continue
         if status == "Resolved" and iss.status != "Resolved":
@@ -268,12 +361,59 @@ def filter_issues(
     return filtered
 
 
-def update_issue_decision(issue: Issue, decision: str) -> bool:
-    """Updates reviewer_decision for an issue in SQLite and mutates in-memory model."""
-    success = db.update_reviewer_decision(issue.id, decision)
+def refresh_review_readiness(result: Optional[ReviewResult]) -> Optional[ReviewResult]:
+    """
+    Recalculates Clearance Readiness Score, band, bounds, and improvements on a ReviewResult model.
+    Defensively falls back to SQLite application records if rule_results are not yet populated.
+    """
+    if result is None:
+        return None
+
+    rules = getattr(result, "rule_results", None) or []
+    # If in-memory rules are empty, load from SQLite applications table if present
+    if not rules and getattr(result, "project_name", None):
+        app_rec = db.get_application_record(result.project_name)
+        if app_rec and app_rec.get("rule_results"):
+            try:
+                raw_rules = json.loads(app_rec["rule_results"])
+                rules = [RuleEvaluation(**r) if isinstance(r, dict) else r for r in raw_rules]
+                result.rule_results = rules
+            except Exception:
+                pass
+
+    readiness_data = calculate_readiness(rules, getattr(result, "issues", []) or [])
+    result.readiness_score = readiness_data["score"]
+    result.readiness_band = readiness_data["band"]
+    result.readiness_range_low = readiness_data["range_low"]
+    result.readiness_range_high = readiness_data["range_high"]
+    result.readiness_category_counts = readiness_data["category_counts"]
+    result.readiness_improvements = readiness_data["top_improvements"]
+    return result
+
+
+def save_reviewer_action(
+    issue: Issue,
+    decision: str,
+    comment: Optional[str] = None,
+    result: Optional[ReviewResult] = None
+) -> bool:
+    """
+    Updates reviewer_decision and optional reviewer_comment in SQLite and mutates in-memory model.
+    Triggers automatic score recalculation in SQLite and on the ReviewResult session model if provided.
+    """
+    success = db.update_reviewer_action(issue.id, decision, comment)
     if success:
         issue.reviewer_decision = decision
+        if comment:
+            issue.reviewer_comment = comment
+        if result is not None:
+            refresh_review_readiness(result)
     return success
+
+
+def update_issue_decision(issue: Issue, decision: str) -> bool:
+    """Updates reviewer_decision for an issue in SQLite and mutates in-memory model."""
+    return save_reviewer_action(issue, decision, None)
 
 
 # ------------------------------------------------------------------------------
@@ -282,14 +422,16 @@ def update_issue_decision(issue: Issue, decision: str) -> bool:
 def format_issues_table_data(issues: List[Issue]) -> List[Dict[str, Any]]:
     """Transforms Issue models into dictionary format for display in a Pandas DataFrame."""
     data = []
-    for issue in issues:
+    for issue in sort_issues_by_priority(issues):
         data.append({
             "Severity": issue.severity,
+            "Confidence": issue.confidence,
             "Category": issue.category,
-            "Evidence Page": issue.evidence_page or "N/A",
+            "Page": issue.page_number or issue.evidence_page or "N/A",
+            "Exact Quote (<=25 words)": issue.quote or issue.evidence_text or "N/A",
             "Description": issue.description,
-            "Evidence Quote": issue.evidence_text or "N/A",
-            "Follow-up Query to Applicant": issue.follow_up_question or "N/A"
+            "Reviewer Status": issue.reviewer_decision or "Pending",
+            "Reviewer Comment": issue.reviewer_comment or "-"
         })
     return data
 

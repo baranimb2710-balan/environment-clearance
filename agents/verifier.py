@@ -50,9 +50,11 @@ class VerifierAgent:
         removed_count = 0
 
         for idx, issue in enumerate(issues):
+            p_ref = issue.page_number or issue.evidence_page or "Full Document"
+            q_text = issue.quote or issue.evidence_text or ""
             self.log(
                 action=f"Thought: Verify Issue #{idx+1} ({issue.category})",
-                observation=f"Checking evidence citation: '{issue.evidence_page}' | Quote: '{issue.evidence_text[:80]}...'"
+                observation=f"Checking evidence citation: '{p_ref}' | Quote: '{q_text[:80]}...'"
             )
 
             # Special case for Missing Study:
@@ -62,6 +64,7 @@ class VerifierAgent:
                     action=f"Action: Verify Absence of Mandatory Study",
                     observation=f"Confirmed '{issue.description}' represents an absent mandatory study."
                 )
+                issue.confidence = "High"
                 verified_issues.append(issue)
                 continue
 
@@ -71,8 +74,8 @@ class VerifierAgent:
             for attempt in range(retries + 1):
                 try:
                     citation_res = verify_citation(
-                        page_ref=issue.evidence_page or "Full Document",
-                        evidence_quote=issue.evidence_text or "",
+                        page_ref=p_ref,
+                        evidence_quote=q_text,
                         text=text
                     )
                     break
@@ -89,6 +92,12 @@ class VerifierAgent:
                     observation=f"Verified: {citation_res.get('reason')}",
                     status="verified"
                 )
+                issue.confidence = "High"
+                if not issue.page_number or issue.page_number == "Full Document":
+                    matched_pg = citation_res.get("matched_page")
+                    if matched_pg:
+                        issue.page_number = f"Page {matched_pg}"
+                        issue.evidence_page = issue.page_number
                 verified_issues.append(issue)
             else:
                 removed_count += 1

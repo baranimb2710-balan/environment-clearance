@@ -11,7 +11,8 @@ from typing import List, Dict, Any, Callable, Optional, Tuple
 from pydantic import BaseModel
 import anthropic
 
-from models import Issue
+from models import Issue, RuleEvaluation
+from ec_rules import EC_RULES
 from agents.tools import (
     EC_CHECKLIST,
     get_checklist_status,
@@ -100,15 +101,19 @@ class CompletenessSpecialist(BaseSpecialist):
                 missing_studies.append(item)
                 self.log(
                     action=f"Observation: Mandatory Study Missing",
-                    observation=f"Study '{item.title()}' is absent. Flagging High-Severity deficiency."
+                    observation=f"Study '{item.title()}' is absent. Flagging Critical deficiency."
                 )
+                quote_text = f"No dedicated section or baseline data found for {item}."
                 issues.append(
                     Issue(
                         category="Missing Study",
-                        severity="High",
+                        severity="Critical",
+                        confidence="High",
                         description=f"Mandatory study '{item.title()}' is missing from the submitted application.",
+                        page_number="Full Document",
+                        quote=quote_text,
                         evidence_page="Full Document",
-                        evidence_text=f"No dedicated section or empirical baseline records found for {item}.",
+                        evidence_text=quote_text,
                         follow_up_question=f"Submit a comprehensive {item.title()} as mandated under the Environmental Clearance guidelines."
                     )
                 )
@@ -123,6 +128,155 @@ class CompletenessSpecialist(BaseSpecialist):
             observation=f"Audit complete: {len(missing_studies)} missing studies identified out of {len(EC_CHECKLIST)}."
         )
         return issues, missing_studies
+
+    def evaluate_rules(self, text: str) -> List[RuleEvaluation]:
+        """
+        Evaluates the document against each of the 18 statutory EC appraisal rules.
+        Returns List[RuleEvaluation] with status, short reason, page_number and quote.
+        """
+        self.log(
+            action="Thought: Evaluate 18 Statutory EC Rules",
+            observation="Scanning document against the 18 statutory EC appraisal rules."
+        )
+
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if api_key and "your_" not in api_key.lower() and len(api_key.strip()) >= 10:
+            client = anthropic.Anthropic(api_key=api_key.strip())
+            rules_prompt_list = [
+                f"- {r['id']}: {r['name']} ({r['category']}, Weight {r['weight']}) - {r['description']}"
+                for r in EC_RULES
+            ]
+            pages = parse_document_pages(text)
+            preview = "\n\n".join(f"--- Page {p} ---\n{c[:500]}" for p, c in list(pages.items())[:8])
+
+            prompt = f"""
+You are the Lead Statutory EC Rules Specialist in the VYRO Multi-Agent Environmental Clearance Review System.
+Evaluate the submitted document against these 18 statutory EC appraisal rules:
+
+{chr(10).join(rules_prompt_list)}
+
+Document Excerpt:
+{preview}
+
+For each of the 18 rules, evaluate the application and determine:
+- "rule_id": The exact rule ID (e.g. "EC-R01")
+- "rule_name": The exact rule name
+- "category": "Critical", "Major", or "Minor"
+- "weight": 3, 2, or 1
+- "status": exactly one of "pass", "partial", "fail", "not_found"
+- "reason": concise technical explanation of compliance or deficiency
+- "page_number": specific citing page(s) (e.g. "Page 2" or "Page 1 vs Page 3")
+- "quote": exact verbatim quote from report (maximum 25 words)
+
+Return strictly valid JSON array of 18 objects:
+[
+  {{
+    "rule_id": "EC-R01",
+    "rule_name": "Terms of Reference (ToR) Compliance",
+    "category": "Critical",
+    "weight": 3,
+    "status": "pass",
+    "reason": "...",
+    "page_number": "Page 1",
+    "quote": "..."
+  }}
+]
+"""
+            for attempt in range(3):
+                try:
+                    self.log(
+                        action=f"Action: Prompt Claude for 18 Rules Audit (Attempt {attempt+1})",
+                        observation="Analyzing statutory conditions, baseline monitoring, and mitigation measures."
+                    )
+                    resp = client.messages.create(
+                        model="claude-3-5-sonnet-20241022",
+                        max_tokens=3000,
+                        temperature=0.1,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+                    raw_out = resp.content[0].text
+                    clean_out = clean_json_string(raw_out)
+                    parsed = json.loads(clean_out)
+                    if isinstance(parsed, list):
+                        evaluations = [RuleEvaluation(**item) for item in parsed]
+                        if len(evaluations) >= 15:
+                            self.log(
+                                action="Observation: Claude 18 Rules Audit Complete",
+                                observation=f"Successfully evaluated {len(evaluations)} rules with citations."
+                            )
+                            return evaluations
+                except Exception as e:
+                    self.log(
+                        action=f"Retry Attempt #{attempt+1}: 18 Rules Audit",
+                        observation=f"Error: {e}. Retrying...",
+                        status="retry"
+                    )
+
+        # Deterministic / offline fallback evaluation
+        self.log(
+            action="Action: Deterministic 18 Rules Evaluation",
+            observation="Evaluating 18 statutory rules against document text and keyword patterns across pages."
+        )
+        evaluations = []
+        pages = parse_document_pages(text)
+
+        for rule in EC_RULES:
+            rid = rule["id"]
+            rname = rule["name"]
+            cat = rule["category"]
+            weight = rule["weight"]
+            keywords = rule["keywords"]
+
+            matched_pages = []
+            best_quote = ""
+
+            for p_num, p_text in pages.items():
+                p_text_lower = p_text.lower()
+                for kw in keywords:
+                    if kw in p_text_lower:
+                        matched_pages.append(p_num)
+                        lines = [l.strip() for l in p_text.splitlines() if kw in l.lower()]
+                        if lines and not best_quote:
+                            words = lines[0].split()
+                            best_quote = " ".join(words[:20])
+                        break
+
+            if matched_pages:
+                page_str = f"Page {matched_pages[0]}" if len(matched_pages) == 1 else f"Pages {', '.join(str(p) for p in matched_pages[:3])}"
+                has_numbers = any(c.isdigit() for c in best_quote)
+                if has_numbers or len(matched_pages) >= 2:
+                    st = "pass"
+                    reason = f"Statutory disclosures and baseline data documented on {page_str}."
+                else:
+                    st = "partial"
+                    reason = f"Disclosed on {page_str} but lacks detailed quantified baseline verification."
+                quote = best_quote if best_quote else f"Document mentions {rname} on {page_str}."
+            else:
+                page_str = "Full Document"
+                if cat == "Critical":
+                    st = "fail"
+                    reason = f"Mandatory baseline study or statutory clearance for '{rname}' is missing from report."
+                else:
+                    st = "not_found"
+                    reason = f"No specific chapter or section addressing '{rname}' identified in text."
+                quote = f"No section or disclosure found for {rname}."
+
+            evaluations.append(RuleEvaluation(
+                rule_id=rid,
+                rule_name=rname,
+                category=cat,
+                weight=weight,
+                status=st,
+                reason=reason,
+                page_number=page_str,
+                quote=quote
+            ))
+
+        self.log(
+            action="Observation: Deterministic 18 Rules Audit Complete",
+            observation=f"Assessed all {len(evaluations)} statutory rules."
+        )
+        return evaluations
 
 
 class ConsistencySpecialist(BaseSpecialist):
@@ -177,15 +331,19 @@ Document text excerpt:
 \"\"\"{text[:4000]}\"\"\"
 
 Identify any conflicting figures across different pages.
+For every issue, extract the specific page number(s) and a short exact quote (max 25 words).
+Assess confidence ("High", "Medium", "Low") and severity ("Critical", "Major", "Minor").
+
 Return strictly valid JSON:
 {{
   "issues": [
     {{
       "category": "Inconsistency",
-      "severity": "High",
+      "severity": "Critical",
+      "confidence": "High",
       "description": "Cross-page discrepancy in water balance.",
-      "evidence_page": "Page 1 vs Page 2",
-      "evidence_text": "Exact conflicting figures quoted.",
+      "page_number": "Page 1 vs Page 2",
+      "quote": "Short exact quote under 25 words.",
       "follow_up_question": "Clarify correct figure."
     }}
   ]
@@ -202,7 +360,7 @@ Return strictly valid JSON:
                         model="claude-3-5-sonnet-20241022",
                         max_tokens=1500,
                         temperature=0.1,
-                        system="You are an expert Environmental Consistency Auditor. Always return strict JSON.",
+                        system="You are an expert Environmental Consistency Auditor. Always return strict JSON with short exact quotes under 25 words.",
                         messages=[{"role": "user", "content": prompt if attempt == 0 else f"{prompt}\nFix previous error: {last_err}"}]
                     )
                     cleaned = clean_json_string(resp.content[0].text)
@@ -231,10 +389,13 @@ Return strictly valid JSON:
             issues.append(
                 Issue(
                     category="Inconsistency",
-                    severity="High",
+                    severity="Critical",
+                    confidence="High",
                     description="Cross-page discrepancy in daily fresh water requirement.",
+                    page_number="Page 1 vs Page 2",
+                    quote="Page 1 states 3,500 m3/day freshwater requirement whereas Table 4.5 on Page 2 records 5,200 m3/day intake.",
                     evidence_page="Page 1 vs Page 2",
-                    evidence_text="Page 1 states: 'fresh water requirement is estimated at 3,500 m3/day' whereas Table 4.5 on Page 2 records: 'Daily Fresh Water Intake: 5,200 m3/day'.",
+                    evidence_text="Page 1 states 3,500 m3/day freshwater requirement whereas Table 4.5 on Page 2 records 5,200 m3/day intake.",
                     follow_up_question="Reconcile the daily fresh water intake figure between the executive summary and Table 4.5 water balance."
                 )
             )
@@ -246,8 +407,11 @@ Return strictly valid JSON:
             issues.append(
                 Issue(
                     category="Inconsistency",
-                    severity="Medium",
+                    severity="Major",
+                    confidence="Medium",
                     description="Process water balance figures require verification with effluent treatment design.",
+                    page_number="Page 2",
+                    quote="Total freshwater intake vs recycled water yields an unexplained variance in net balance.",
                     evidence_page="Page 2",
                     evidence_text="Total freshwater intake vs recycled water yields an unexplained variance in net balance.",
                     follow_up_question="Provide a certified mass balance sheet for all industrial process water streams."
@@ -259,10 +423,13 @@ Return strictly valid JSON:
             issues.append(
                 Issue(
                     category="Inconsistency",
-                    severity="Medium",
+                    severity="Major",
+                    confidence="High",
                     description="Conflicting greenbelt coverage percentage specified across chapters.",
+                    page_number="Page 2 vs Page 3",
+                    quote="Chapter 7 commits to 33% greenbelt plantation, while Chapter 4 specifies 25% greenbelt development.",
                     evidence_page="Page 2 vs Page 3",
-                    evidence_text="Chapter 7 EMP commits to '33% greenbelt plantation' on Page 3, while Chapter 4 on Page 2 specifies '25% greenbelt development'.",
+                    evidence_text="Chapter 7 commits to 33% greenbelt plantation, while Chapter 4 specifies 25% greenbelt development.",
                     follow_up_question="Submit a revised land use demarcation drawing confirming a minimum 33% greenbelt area."
                 )
             )
@@ -320,10 +487,13 @@ class ContradictionSpecialist(BaseSpecialist):
             issues.append(
                 Issue(
                     category="Contradiction",
-                    severity="High",
+                    severity="Critical",
+                    confidence="High",
                     description="Narrative claim of zero groundwater impact directly contradicts baseline hydrogeological findings.",
+                    page_number="Page 1 vs Page 2",
+                    quote="Page 1 claims zero groundwater stress while Page 2 notes local aquifer categorized as Over-Exploited falling 1.2 m/year.",
                     evidence_page="Page 1 vs Page 2",
-                    evidence_text="Page 1 claims: 'Project site exhibits zero groundwater stress with abundant aquifer recharge' while Page 2 baseline data notes: 'Local aquifer is categorized as Over-Exploited with water table falling 1.2 m/year'.",
+                    evidence_text="Page 1 claims zero groundwater stress while Page 2 notes local aquifer categorized as Over-Exploited falling 1.2 m/year.",
                     follow_up_question="Provide Central Ground Water Board (CGWB) clearance and an artificial aquifer recharge plan."
                 )
             )
@@ -335,10 +505,13 @@ class ContradictionSpecialist(BaseSpecialist):
             issues.append(
                 Issue(
                     category="Contradiction",
-                    severity="Medium",
+                    severity="Major",
+                    confidence="Medium",
                     description="Air quality impact assertion conflicts with ambient particulate baseline recordings.",
+                    page_number="Page 2",
+                    quote="Narrative states ambient air is well within standards, but baseline shows PM10 levels exceeding NAAQS at 3 stations.",
                     evidence_page="Page 2",
-                    evidence_text="Narrative states ambient air is well within national standards, but baseline table shows PM10 levels exceeding NAAQS at 3 stations.",
+                    evidence_text="Narrative states ambient air is well within standards, but baseline shows PM10 levels exceeding NAAQS at 3 stations.",
                     follow_up_question="Re-evaluate dispersion modeling considering baseline NAAQS exceedances."
                 )
             )

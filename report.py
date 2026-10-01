@@ -166,11 +166,16 @@ def generate_review_pdf(result: ReviewResult) -> bytes:
 
     # Metadata Grid
     now_str = datetime.now().strftime("%B %d, %Y &bull; %H:%M")
+    r_score = getattr(result, "readiness_score", None) if getattr(result, "readiness_score", None) is not None else result.completeness_score
+    r_band = getattr(result, "readiness_band", None) or ("High" if r_score >= 85 else ("Moderate" if r_score >= 65 else "Low"))
+    r_low = getattr(result, "readiness_range_low", None) if getattr(result, "readiness_range_low", None) is not None else r_score
+    r_high = getattr(result, "readiness_range_high", None) if getattr(result, "readiness_range_high", None) is not None else r_score
+
     meta_data = [
         [Paragraph("<b>Project Name:</b>", meta_label), Paragraph(result.project_name, meta_value),
          Paragraph("<b>Audit Date:</b>", meta_label), Paragraph(now_str, meta_value)],
-        [Paragraph("<b>Completeness:</b>", meta_label), Paragraph(f"<b>{result.completeness_score}%</b>", meta_value),
-         Paragraph("<b>Audit Status:</b>", meta_label), Paragraph("<font color='#16a34a'><b>COMPLETED</b></font>", meta_value)]
+        [Paragraph("<b>Readiness Score:</b>", meta_label), Paragraph(f"<b>{r_score}%</b> ({r_band} Band)", meta_value),
+         Paragraph("<b>Estimated Range:</b>", meta_label), Paragraph(f"[{r_low}% &ndash; {r_high}%]", meta_value)]
     ]
     meta_table = Table(meta_data, colWidths=[90, 200, 80, 170])
     meta_table.setStyle(TableStyle([
@@ -183,7 +188,7 @@ def generate_review_pdf(result: ReviewResult) -> bytes:
         ('RIGHTPADDING', (0, 0), (-1, -1), 8),
     ]))
     story.append(meta_table)
-    story.append(Spacer(1, 12))
+    story.append(Spacer(1, 10))
 
     # 2. EXECUTIVE SUMMARY
     story.append(Paragraph("1. Executive Summary", h2_style))
@@ -199,8 +204,67 @@ def generate_review_pdf(result: ReviewResult) -> bytes:
     story.append(summary_box)
     story.append(Spacer(1, 10))
 
-    # 3. MISSING MANDATORY STUDIES
-    story.append(Paragraph("2. Mandatory Studies Checklist Audit", h2_style))
+    # 3. STATUTORY CLEARANCE READINESS APPRAISAL
+    story.append(Paragraph("2. Statutory Clearance Readiness Appraisal (18 MoEFCC Rules)", h2_style))
+    
+    # Readiness Score Box
+    score_tint = colors.HexColor("#dcfce7") if r_band == "High" else (colors.HexColor("#dbeafe") if r_band == "Moderate" else colors.HexColor("#ffedd5"))
+    score_border = colors.HexColor("#16a34a") if r_band == "High" else (colors.HexColor("#2563eb") if r_band == "Moderate" else colors.HexColor("#ea580c"))
+    score_text = f"<b>Readiness Score: {r_score}% &nbsp;|&nbsp; Band: {r_band.upper()} &nbsp;|&nbsp; Uncertainty Range: [{r_low}% &ndash; {r_high}%]</b>"
+    
+    readiness_box = Table([[Paragraph(score_text, body_style)]], colWidths=[540])
+    readiness_box.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), score_tint),
+        ('BOX', (0, 0), (-1, -1), 1.0, score_border),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+    ]))
+    story.append(readiness_box)
+    story.append(Spacer(1, 6))
+
+    # Category Counts Table
+    cc = getattr(result, "readiness_category_counts", None) or {}
+    crit_c = cc.get("Critical", {"pass": 0, "partial": 0, "fail": 0, "not_found": 0, "total": 6})
+    maj_c = cc.get("Major", {"pass": 0, "partial": 0, "fail": 0, "not_found": 0, "total": 8})
+    min_c = cc.get("Minor", {"pass": 0, "partial": 0, "fail": 0, "not_found": 0, "total": 4})
+
+    cat_rows = [
+        [Paragraph("Category (Weight)", meta_label), Paragraph("Pass", meta_label), Paragraph("Partial", meta_label), Paragraph("Fail", meta_label), Paragraph("Missing", meta_label), Paragraph("Total", meta_label)],
+        [Paragraph("Critical Rules (w=3)", body_style), Paragraph(str(crit_c.get("pass", 0)), body_style), Paragraph(str(crit_c.get("partial", 0)), body_style), Paragraph(str(crit_c.get("fail", 0)), body_style), Paragraph(str(crit_c.get("not_found", 0)), body_style), Paragraph(str(crit_c.get("total", 6)), body_style)],
+        [Paragraph("Major Rules (w=2)", body_style), Paragraph(str(maj_c.get("pass", 0)), body_style), Paragraph(str(maj_c.get("partial", 0)), body_style), Paragraph(str(maj_c.get("fail", 0)), body_style), Paragraph(str(maj_c.get("not_found", 0)), body_style), Paragraph(str(maj_c.get("total", 8)), body_style)],
+        [Paragraph("Minor Rules (w=1)", body_style), Paragraph(str(min_c.get("pass", 0)), body_style), Paragraph(str(min_c.get("partial", 0)), body_style), Paragraph(str(min_c.get("fail", 0)), body_style), Paragraph(str(min_c.get("not_found", 0)), body_style), Paragraph(str(min_c.get("total", 4)), body_style)],
+    ]
+    cat_table = Table(cat_rows, colWidths=[160, 75, 75, 75, 75, 80])
+    cat_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f1f5f9")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.append(cat_table)
+    story.append(Spacer(1, 6))
+
+    # Top Improvements
+    improvements = getattr(result, "readiness_improvements", None) or []
+    if improvements:
+        story.append(Paragraph("<b>Top Priority Recommendations to Improve Score:</b>", meta_label))
+        for imp in improvements[:3]:
+            gain_txt = f"<font color='#16a34a'><b>+{imp['score_gain']}% Gain</b></font>"
+            imp_p = Paragraph(f"&bull; <b>{imp['rule_name']}</b> ({imp['category']}) &mdash; {gain_txt}: <i>{imp['recommendation']}</i>", body_style)
+            story.append(imp_p)
+        story.append(Spacer(1, 4))
+
+    # Mandatory Disclaimer
+    disclaimer_text = "<font color='#64748b' size='7.5'><i>Indicative estimate based on rule compliance. Final decision rests with EAC/SEAC.</i></font>"
+    story.append(Paragraph(disclaimer_text, body_style))
+    story.append(Spacer(1, 10))
+
+    # 4. MISSING MANDATORY STUDIES
+    story.append(Paragraph("3. Mandatory Studies Checklist Audit", h2_style))
     if result.missing_studies:
         missing_items = []
         for study in result.missing_studies:
@@ -260,23 +324,26 @@ def generate_review_pdf(result: ReviewResult) -> bytes:
             
             # Severity color format
             sev = issue.severity.upper()
-            if sev == "HIGH":
-                sev_html = "<font color='#991b1b'><b>HIGH</b></font>"
+            if sev in ("CRITICAL", "HIGH"):
+                sev_html = "<font color='#991b1b'><b>CRITICAL</b></font>"
                 sev_bg = colors.HexColor("#fee2e2")
-            elif sev == "MEDIUM":
-                sev_html = "<font color='#9a3412'><b>MED</b></font>"
+            elif sev in ("MAJOR", "MEDIUM"):
+                sev_html = "<font color='#9a3412'><b>MAJOR</b></font>"
                 sev_bg = colors.HexColor("#ffedd5")
             else:
-                sev_html = "<font color='#166534'><b>LOW</b></font>"
+                sev_html = "<font color='#166534'><b>MINOR</b></font>"
                 sev_bg = colors.HexColor("#dcfce7")
+
+            p_val = issue.page_number or issue.evidence_page or "N/A"
+            q_val = issue.quote or issue.evidence_text or "N/A"
 
             row = [
                 Paragraph(str(row_num), table_cell),
                 Paragraph(f"<b>{issue.category}</b>", table_cell),
                 Paragraph(sev_html, table_cell),
                 Paragraph(issue.description, table_cell),
-                Paragraph(issue.evidence_page or "N/A", table_cell),
-                Paragraph(issue.evidence_text or "N/A", table_cell),
+                Paragraph(p_val, table_cell),
+                Paragraph(q_val, table_cell),
             ]
             table_rows.append(row)
 
