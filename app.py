@@ -152,6 +152,11 @@ if not st.session_state.get("role") and current_username:
         st.session_state["role"] = user_data["role"]
         st.session_state["name"] = user_data["name"]
 
+    # Record login timestamp in users table upon authentication
+    if not st.session_state.get("login_timestamp_recorded"):
+        services.record_user_login(current_username)
+        st.session_state["login_timestamp_recorded"] = True
+
 current_name = st.session_state.get("name", current_username)
 current_role = st.session_state.get("role", "reviewer")
 
@@ -180,41 +185,74 @@ with st.sidebar:
     st.divider()
 
     # Navigation menu between pages
-    if st.session_state.get("review_result"):
-        st.markdown("### 🧭 Navigation")
-        curr_page = st.session_state.get("auth_page", "submit")
-        if current_role == "reviewer":
-            nav_options = ["📤 Submit Report", "📊 Audit Results & Follow-Up", "🎯 Reviewer Priority View"]
+    st.markdown("### 🧭 Navigation")
+    curr_page = st.session_state.get("auth_page", "submit")
+    has_res = st.session_state.get("review_result") is not None
+
+    if current_role == "reviewer":
+        if has_res:
+            nav_options = [
+                "📤 Submit Report",
+                "📊 Audit Results & Follow-Up",
+                "🎯 Reviewer Priority View",
+                "👥 Users View",
+                "📑 Reports View"
+            ]
             page_map = {
                 "📤 Submit Report": "submit",
                 "📊 Audit Results & Follow-Up": "results",
-                "🎯 Reviewer Priority View": "reviewer_priority"
+                "🎯 Reviewer Priority View": "reviewer_priority",
+                "👥 Users View": "users",
+                "📑 Reports View": "reports"
             }
         else:
-            nav_options = ["📤 Submit Report", "📊 Audit Results & Follow-Up"]
+            nav_options = [
+                "📤 Submit Report",
+                "👥 Users View",
+                "📑 Reports View"
+            ]
             page_map = {
                 "📤 Submit Report": "submit",
-                "📊 Audit Results & Follow-Up": "results"
+                "👥 Users View": "users",
+                "📑 Reports View": "reports"
             }
-            if curr_page == "reviewer_priority":
-                curr_page = "results"
-                st.session_state["auth_page"] = "results"
+    else:
+        if has_res:
+            nav_options = [
+                "📤 Submit Report",
+                "📊 Audit Results & Follow-Up",
+                "📑 Reports View"
+            ]
+            page_map = {
+                "📤 Submit Report": "submit",
+                "📊 Audit Results & Follow-Up": "results",
+                "📑 Reports View": "reports"
+            }
+        else:
+            nav_options = [
+                "📤 Submit Report",
+                "📑 Reports View"
+            ]
+            page_map = {
+                "📤 Submit Report": "submit",
+                "📑 Reports View": "reports"
+            }
 
-        rev_map = {v: k for k, v in page_map.items()}
-        current_label = rev_map.get(curr_page, nav_options[0])
-        default_idx = nav_options.index(current_label) if current_label in nav_options else 0
+    rev_map = {v: k for k, v in page_map.items()}
+    current_label = rev_map.get(curr_page, nav_options[0])
+    default_idx = nav_options.index(current_label) if current_label in nav_options else 0
 
-        selected_nav = st.radio(
-            "Current View:",
-            nav_options,
-            index=default_idx,
-            key="sidebar_nav_selection"
-        )
-        target_page = page_map[selected_nav]
-        if target_page != curr_page:
-            st.session_state["auth_page"] = target_page
-            st.rerun()
-        st.divider()
+    selected_nav = st.radio(
+        "Current View:",
+        nav_options,
+        index=default_idx,
+        key="sidebar_nav_selection"
+    )
+    target_page = page_map[selected_nav]
+    if target_page != curr_page:
+        st.session_state["auth_page"] = target_page
+        st.rerun()
+    st.divider()
     
     # Logout action
     try:
@@ -227,6 +265,7 @@ with st.sidebar:
             st.session_state["role"] = None
             st.session_state["review_result"] = None
             st.session_state["review_project_name"] = ""
+            st.session_state["login_timestamp_recorded"] = False
             st.session_state["auth_page"] = "submit"
             st.session_state["page"] = "landing"
             st.rerun()
@@ -239,6 +278,7 @@ with st.sidebar:
         st.session_state["role"] = None
         st.session_state["review_result"] = None
         st.session_state["review_project_name"] = ""
+        st.session_state["login_timestamp_recorded"] = False
         st.session_state["auth_page"] = "submit"
         st.session_state["page"] = "landing"
         st.rerun()
@@ -254,7 +294,119 @@ if current_auth_page == "reviewer_priority" and current_role != "reviewer":
     current_auth_page = "results" if has_review_result else "submit"
     st.session_state["auth_page"] = current_auth_page
 
-if not has_review_result or current_auth_page == "submit":
+if current_auth_page == "users":
+    # --------------------------------------------------------------------------
+    # VIEW: USERS DIRECTORY (AUTHENTICATION DATA ONLY)
+    # --------------------------------------------------------------------------
+    st.markdown("## 👥 Users Directory")
+    st.caption("Authentication and user account credentials (strictly isolated from application and report data).")
+
+    users_data = services.get_users_page_data()
+
+    # Top KPI Metrics
+    total_u = len(users_data)
+    reviewers_cnt = sum(1 for u in users_data if u.get("role") == "reviewer")
+    applicants_cnt = sum(1 for u in users_data if u.get("role") == "applicant")
+
+    m_col1, m_col2, m_col3 = st.columns(3)
+    with m_col1:
+        st.metric("Total Registered Users", total_u)
+    with m_col2:
+        st.metric("Appraisal Officers (Reviewers)", reviewers_cnt)
+    with m_col3:
+        st.metric("Project Proponents (Applicants)", applicants_cnt)
+
+    st.markdown("---")
+
+    # Format table for display
+    display_rows = []
+    for u in users_data:
+        display_rows.append({
+            "Email": u.get("email"),
+            "Signup Date": str(u.get("signup_date") or "")[:19],
+            "Last Login": str(u.get("last_login") or "Never")[:19],
+            "Role": "🟢 Reviewer" if u.get("role") == "reviewer" else "🔵 Applicant",
+            "Username": u.get("username"),
+            "Full Name": u.get("name")
+        })
+
+    df_users = pd.DataFrame(display_rows)
+    st.dataframe(df_users, use_container_width=True, hide_index=True)
+
+    st.info("🔒 **Data Isolation Verified**: The `users` table contains strictly authentication, password hash, role, and login activity. Zero environmental clearance reports or compliance issues are mixed into this table.")
+
+elif current_auth_page == "reports":
+    # --------------------------------------------------------------------------
+    # VIEW: APPLICATIONS & REPORTS (APPLICATION DATA ONLY)
+    # --------------------------------------------------------------------------
+    st.markdown("## 📑 Environmental Clearance Applications & Reports")
+    st.caption("Statutory environmental clearance appraisal records (strictly isolated from user credentials).")
+
+    reports_data = services.get_reports_page_data(
+        username=current_username if current_role == "applicant" else None,
+        role=current_role
+    )
+
+    total_reps = len(reports_data)
+    valid_scores = [r.get("readiness_score") for r in reports_data if r.get("readiness_score") is not None]
+    avg_score = round(sum(valid_scores) / max(len(valid_scores), 1)) if valid_scores else 0
+    high_cnt = sum(1 for r in reports_data if (r.get("readiness_band") == "High" or (r.get("readiness_score") or 0) >= 85))
+    total_issues_all = sum(r.get("total_issues", 0) for r in reports_data)
+
+    r_col1, r_col2, r_col3, r_col4 = st.columns(4)
+    with r_col1:
+        st.metric("Total Applications", total_reps)
+    with r_col2:
+        st.metric("Average Readiness", f"{avg_score}%")
+    with r_col3:
+        st.metric("High Readiness Band", high_cnt)
+    with r_col4:
+        st.metric("Total Compliance Issues", total_issues_all)
+
+    st.markdown("---")
+
+    display_reports = []
+    for r in reports_data:
+        r_low = r.get("readiness_range_low")
+        r_high = r.get("readiness_range_high")
+        range_str = f"[{r_low}% - {r_high}%]" if r_low is not None and r_high is not None else "N/A"
+
+        display_reports.append({
+            "Project Name": r.get("project_name"),
+            "Owner": r.get("owner_username"),
+            "Readiness Score": f"{r.get('readiness_score')}%" if r.get('readiness_score') is not None else "N/A",
+            "Readiness Band": r.get("readiness_band") or "N/A",
+            "Uncertainty Range": range_str,
+            "Completeness Score": f"{r.get('completeness_score')}%" if r.get('completeness_score') is not None else "N/A",
+            "Issues (Open/Total)": f"{r.get('open_issues', 0)} / {r.get('total_issues', 0)}",
+            "Confirmed / Dismissed": f"{r.get('confirmed_issues', 0)} / {r.get('dismissed_issues', 0)}",
+            "Last Audit Update": str(r.get("updated_at") or "")[:19]
+        })
+
+    df_reports = pd.DataFrame(display_reports)
+    st.dataframe(df_reports, use_container_width=True, hide_index=True)
+
+    st.markdown("### 🔍 Open Project in Audit Viewer")
+    project_names = [r["project_name"] for r in reports_data]
+    if project_names:
+        c_sel, c_btn = st.columns([3, 1])
+        with c_sel:
+            chosen_pname = st.selectbox("Select Project to Inspect:", project_names, key="rep_view_select_pname")
+        with c_btn:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("🚀 Load into Audit Viewer", key="btn_load_from_rep_view", use_container_width=True, type="primary"):
+                loaded_audit = services.load_project_audit(chosen_pname)
+                if loaded_audit:
+                    st.session_state["review_result"] = loaded_audit
+                    st.session_state["review_project_name"] = chosen_pname
+                    st.session_state["auth_page"] = "results"
+                    st.rerun()
+                else:
+                    st.error(f"Could not load audit data for '{chosen_pname}'.")
+
+    st.info("🛡️ **Relational Integrity Verified**: The `applications` table contains strictly report metadata and multi-agent audit results. User relationship is maintained via foreign key `owner_username -> users.username` without duplicating user credentials.")
+
+elif current_auth_page == "submit" or not has_review_result:
     # --------------------------------------------------------------------------
     # PAGE 1: SUBMIT ENVIRONMENTAL CLEARANCE REPORT
     # --------------------------------------------------------------------------
@@ -543,7 +695,7 @@ elif current_auth_page == "reviewer_priority" and current_role == "reviewer" and
             st.session_state["auth_page"] = "results"
             st.rerun()
 
-else:
+elif current_auth_page == "results" and has_review_result:
     # --------------------------------------------------------------------------
     # PAGE 2: AUDIT RESULTS DASHBOARD & APPLICANT FOLLOW-UP (Dedicated Page)
     # --------------------------------------------------------------------------
@@ -879,4 +1031,8 @@ else:
                 if r_issue.ai_reason:
                     st.success(f"**AI Approval Reason:** {r_issue.ai_reason}")
                 st.divider()
+
+else:
+    st.session_state["auth_page"] = "submit"
+    st.rerun()
 

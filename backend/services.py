@@ -73,6 +73,21 @@ def get_user_profile(username: str) -> Optional[Dict[str, Any]]:
     return db.get_user(username)
 
 
+def record_user_login(username: str) -> bool:
+    """Updates the last_login timestamp in users table upon authentication."""
+    return db.update_user_last_login(username)
+
+
+def get_users_page_data() -> List[Dict[str, Any]]:
+    """Retrieves user accounts strictly for the Users view (email, signup date, last login)."""
+    return db.get_users_view()
+
+
+def get_reports_page_data(username: Optional[str] = None, role: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieves application and report records strictly for the Reports view."""
+    return db.get_reports_view(username=username, role=role)
+
+
 # ------------------------------------------------------------------------------
 # 2. Audit History & Project Loading Services
 # ------------------------------------------------------------------------------
