@@ -17,6 +17,250 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def inject_environmental_theme():
+    """Injects high-end Environmental Clearance styling, atmospheric nature background, and glassmorphic cards."""
+    st.markdown(
+        """
+        <style>
+        /* Modern Environmental Clearance (MoEFCC/EAC Biome) Styling */
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+        html, body, [class*="css"] {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        /* 1. Atmospheric Deep Canopy / Ecological Background */
+        .stApp {
+            background-color: #06110d !important;
+            background-image: 
+                radial-gradient(circle at 12% 15%, rgba(16, 185, 129, 0.16) 0%, transparent 45%),
+                radial-gradient(circle at 88% 22%, rgba(5, 150, 105, 0.14) 0%, transparent 45%),
+                radial-gradient(circle at 50% 80%, rgba(20, 83, 45, 0.22) 0%, transparent 55%),
+                radial-gradient(circle at 75% 85%, rgba(52, 211, 153, 0.08) 0%, transparent 35%),
+                linear-gradient(165deg, #050d0a 0%, #081711 25%, #0b1f17 60%, #06120d 100%) !important;
+            background-attachment: fixed !important;
+            color: #f1f5f9 !important;
+        }
+
+        /* Ambient ecological dot mesh overlay */
+        .stApp::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: radial-gradient(rgba(52, 211, 153, 0.12) 1px, transparent 1px);
+            background-size: 28px 28px;
+            opacity: 0.45;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* 2. Glassmorphic Sidebar with Nature Biome Accent */
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(6, 17, 13, 0.96) 0%, rgba(4, 12, 9, 0.98) 100%) !important;
+            border-right: 1px solid rgba(52, 211, 153, 0.2) !important;
+            box-shadow: 4px 0 24px rgba(0, 0, 0, 0.45) !important;
+            backdrop-filter: blur(16px) !important;
+        }
+
+        /* 3. Metric Cards with Eco Glow */
+        [data-testid="stMetric"] {
+            background: rgba(11, 26, 19, 0.75) !important;
+            border: 1px solid rgba(52, 211, 153, 0.25) !important;
+            border-radius: 14px !important;
+            padding: 16px 20px !important;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(52, 211, 153, 0.15) !important;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+        [data-testid="stMetric"]:hover {
+            transform: translateY(-3px);
+            border-color: rgba(52, 211, 153, 0.6) !important;
+            box-shadow: 0 12px 30px rgba(16, 185, 129, 0.25), inset 0 1px 0 rgba(52, 211, 153, 0.3) !important;
+        }
+        [data-testid="stMetricValue"] {
+            color: #4ade80 !important;
+            font-weight: 800 !important;
+            letter-spacing: -0.02em;
+            text-shadow: 0 0 16px rgba(74, 222, 128, 0.3);
+        }
+        [data-testid="stMetricLabel"] {
+            color: #94a3b8 !important;
+            font-weight: 600 !important;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-size: 0.78rem !important;
+        }
+
+        /* 4. Primary & Action Buttons (Emerald Gradient Glow) */
+        button[kind="primary"], .stButton > button[kind="primary"], [data-testid="baseButton-primary"] {
+            background: linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%) !important;
+            color: #032115 !important;
+            font-weight: 700 !important;
+            border: none !important;
+            border-radius: 10px !important;
+            padding: 0.6rem 1.4rem !important;
+            box-shadow: 0 4px 18px rgba(16, 185, 129, 0.35) !important;
+            transition: all 0.25s ease-in-out !important;
+        }
+        button[kind="primary"]:hover, .stButton > button[kind="primary"]:hover {
+            box-shadow: 0 6px 28px rgba(52, 211, 153, 0.65) !important;
+            transform: translateY(-2px);
+            filter: brightness(1.08);
+        }
+        button[kind="secondary"], .stButton > button[kind="secondary"], [data-testid="baseButton-secondary"] {
+            background: rgba(14, 32, 24, 0.7) !important;
+            color: #f1f5f9 !important;
+            border: 1px solid rgba(52, 211, 153, 0.35) !important;
+            border-radius: 10px !important;
+            transition: all 0.25s ease-in-out !important;
+        }
+        button[kind="secondary"]:hover, .stButton > button[kind="secondary"]:hover {
+            background: rgba(20, 48, 36, 0.9) !important;
+            border-color: #34d399 !important;
+            color: #4ade80 !important;
+            box-shadow: 0 4px 16px rgba(52, 211, 153, 0.25) !important;
+        }
+
+        /* 5. Ecological File Upload Zone */
+        [data-testid="stFileUploader"] {
+            background: rgba(11, 26, 19, 0.7) !important;
+            border: 2px dashed rgba(52, 211, 153, 0.4) !important;
+            border-radius: 14px !important;
+            padding: 18px !important;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25) !important;
+            transition: all 0.3s ease;
+        }
+        [data-testid="stFileUploader"]:hover {
+            border-color: #34d399 !important;
+            background: rgba(16, 185, 129, 0.1) !important;
+            box-shadow: 0 6px 25px rgba(16, 185, 129, 0.22) !important;
+        }
+
+        /* 6. Tabs & Navigation Highlights */
+        [data-baseweb="tab-list"] {
+            gap: 10px;
+            border-bottom: 1px solid rgba(52, 211, 153, 0.2) !important;
+        }
+        [data-baseweb="tab"] {
+            color: #94a3b8 !important;
+            font-weight: 600 !important;
+            border-radius: 8px 8px 0 0 !important;
+            padding: 8px 18px !important;
+            transition: all 0.2s ease;
+        }
+        [data-baseweb="tab"]:hover {
+            color: #4ade80 !important;
+            background: rgba(16, 185, 129, 0.08) !important;
+        }
+        [aria-selected="true"] {
+            color: #4ade80 !important;
+            border-bottom: 3px solid #34d399 !important;
+        }
+
+        /* 7. Inputs & Selectboxes */
+        .stTextInput > div > div > input, 
+        .stTextArea > div > div > textarea, 
+        .stSelectbox > div > div {
+            background: rgba(9, 21, 16, 0.85) !important;
+            border: 1px solid rgba(52, 211, 153, 0.28) !important;
+            color: #f8fafc !important;
+            border-radius: 9px !important;
+        }
+        .stTextInput > div > div > input:focus, 
+        .stTextArea > div > div > textarea:focus {
+            border-color: #34d399 !important;
+            box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.35) !important;
+        }
+
+        /* 8. Expanders & Containers */
+        .streamlit-expanderHeader {
+            background: rgba(12, 27, 20, 0.75) !important;
+            border: 1px solid rgba(52, 211, 153, 0.22) !important;
+            border-radius: 10px !important;
+            color: #f8fafc !important;
+            font-weight: 600 !important;
+        }
+        .streamlit-expanderHeader:hover {
+            border-color: rgba(52, 211, 153, 0.5) !important;
+            background: rgba(18, 40, 30, 0.85) !important;
+        }
+
+        /* 9. Dataframe & Tables */
+        [data-testid="stDataFrame"] {
+            background: rgba(9, 21, 16, 0.8) !important;
+            border: 1px solid rgba(52, 211, 153, 0.25) !important;
+            border-radius: 12px !important;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35) !important;
+        }
+
+        /* 10. Callout Boxes */
+        .stAlert {
+            border-radius: 12px !important;
+            backdrop-filter: blur(8px) !important;
+        }
+        div[data-testid="stAlert"]:has(div[data-testid="stAlertContentSuccess"]) {
+            background: rgba(22, 101, 52, 0.25) !important;
+            border: 1px solid #16a34a !important;
+        }
+        div[data-testid="stAlert"]:has(div[data-testid="stAlertContentInfo"]) {
+            background: rgba(13, 148, 136, 0.18) !important;
+            border: 1px solid #0d9488 !important;
+        }
+
+        /* 11. Radio Buttons in Sidebar */
+        [data-testid="stSidebar"] [data-testid="stRadio"] > div {
+            background: rgba(10, 24, 18, 0.65);
+            padding: 12px 14px;
+            border-radius: 12px;
+            border: 1px solid rgba(52, 211, 153, 0.18);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+def render_environmental_header(role_display: str, name: str):
+    """Renders a top status badge emphasizing the MoEFCC/SEAC Environmental Clearance compliance posture."""
+    st.markdown(
+        f"""
+        <div style='display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+                    padding: 12px 20px; margin-bottom: 22px; 
+                    background: rgba(16, 185, 129, 0.08); 
+                    border: 1px solid rgba(52, 211, 153, 0.25); 
+                    border-radius: 12px; backdrop-filter: blur(10px);
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.25);'>
+            <div style='display: flex; align-items: center; gap: 12px;'>
+                <div style='width: 38px; height: 38px; border-radius: 10px; background: rgba(52, 211, 153, 0.18); display: flex; align-items: center; justify-content: center; font-size: 1.3rem; border: 1px solid rgba(52, 211, 153, 0.35);'>
+                    🌿
+                </div>
+                <div>
+                    <div style='font-size: 0.95rem; font-weight: 800; color: #4ade80; letter-spacing: 0.03em;'>
+                        EIA 2006 & MoEFCC STATUTORY CLEARANCE AUDIT
+                    </div>
+                    <div style='font-size: 0.78rem; color: #94a3b8;'>
+                        Environmental Impact Assessment &bull; Scrutiny Protocol Active &bull; Parivesh 2.0 AI Standard
+                    </div>
+                </div>
+            </div>
+            <div style='display: flex; align-items: center; gap: 14px;'>
+                <span style='background: rgba(52, 211, 153, 0.15); border: 1px solid rgba(52, 211, 153, 0.4); color: #86efac; padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 700;'>
+                    🌱 Eco-Scrutiny Engine
+                </span>
+                <div style='display: flex; align-items: center; gap: 6px;'>
+                    <span style='width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 10px #4ade80; display: inline-block;'></span>
+                    <span style='font-size: 0.78rem; color: #a7f3d0; font-weight: 600;'>System Online</span>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+# 0. Inject Environmental Theme Immediately
+inject_environmental_theme()
+
 # 1. Initialize SQLite database schema
 services.init_database()
 
@@ -61,17 +305,23 @@ if not st.session_state.get("authentication_status"):
                 st.session_state["page"] = "landing"
                 st.rerun()
 
-        col_a, col_b, col_c = st.columns([1, 2, 1])
+        col_a, col_b, col_c = st.columns([1, 2.2, 1])
         with col_b:
             st.markdown(
                 """
-                <div style='text-align: center; margin-bottom: 20px;'>
-                    <h2 style='font-size: 2.6rem; font-weight: 900; margin: 0;
-                               background: linear-gradient(135deg, #4ade80, #16a34a);
+                <div style='text-align: center; margin-bottom: 25px;'>
+                    <div style='display: inline-flex; align-items: center; gap: 8px; background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.3); padding: 5px 14px; border-radius: 20px; margin-bottom: 12px;'>
+                        <span style='font-size: 1rem;'>🌿</span>
+                        <span style='font-size: 0.78rem; font-weight: 700; color: #4ade80; letter-spacing: 0.08em; text-transform: uppercase;'>Statutory Environmental Clearance Portal</span>
+                    </div>
+                    <h1 style='font-size: 3.2rem; font-weight: 900; margin: 0; letter-spacing: 2px;
+                               background: linear-gradient(135deg, #4ade80 0%, #22c55e 50%, #10b981 100%);
                                -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>
                         VYRO
-                    </h2>
-                    <p style='color: #94a3b8; font-size: 1rem; margin-top: 4px;'>Environmental Clearance Application Review</p>
+                    </h1>
+                    <p style='color: #94a3b8; font-size: 1.05rem; margin-top: 6px; font-weight: 500;'>
+                        AI-Powered EIA / EMP Appraisal & Scrutiny Engine
+                    </p>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -164,25 +414,47 @@ current_role = st.session_state.get("role", "reviewer")
 with st.sidebar:
     st.markdown(
         """
-        <div style='margin-bottom: 10px;'>
-            <h2 style='font-size: 1.8rem; font-weight: 900; margin: 0;
-                       background: linear-gradient(135deg, #4ade80, #16a34a);
-                       -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>
-                VYRO
-            </h2>
-            <p style='color: #94a3b8; font-size: 0.85rem; margin-top: 2px;'>EC Review System</p>
+        <div style='margin-bottom: 12px; padding: 4px 0;'>
+            <div style='display: flex; align-items: center; gap: 8px;'>
+                <span style='font-size: 1.5rem;'>🌿</span>
+                <div>
+                    <h2 style='font-size: 1.85rem; font-weight: 900; margin: 0; line-height: 1.1;
+                               background: linear-gradient(135deg, #4ade80, #16a34a);
+                               -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>
+                        VYRO
+                    </h2>
+                    <p style='color: #86efac; font-size: 0.76rem; margin-top: 1px; font-weight: 600; letter-spacing: 0.05em;'>
+                        ECO CLEARANCE AUDIT
+                    </p>
+                </div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True
     )
-    st.divider()
-    st.markdown(f"**Logged in as:**\n### {current_name}")
     
     role_color = "🟢" if current_role == "reviewer" else "🔵"
     role_display = "EC Reviewer / Officer" if current_role == "reviewer" else "Project Applicant"
-    st.markdown(f"**Role:** {role_color} `{role_display}`")
-    st.caption(f"Username: `{current_username}`")
-    st.divider()
+
+    st.markdown(
+        f"""
+        <div style='background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(52, 211, 153, 0.25); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px;'>
+            <div style='font-size: 0.68rem; font-weight: 800; color: #4ade80; text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 6px;'>
+                <span>🌱</span> ACTIVE WORKSPACE
+            </div>
+            <div style='font-size: 1.05rem; font-weight: 700; color: #f8fafc; margin-top: 4px;'>
+                {current_name}
+            </div>
+            <div style='font-size: 0.8rem; color: #cbd5e1; margin-top: 2px;'>
+                {role_color} <b>{role_display}</b>
+            </div>
+            <div style='font-size: 0.74rem; color: #94a3b8; margin-top: 2px; font-family: monospace;'>
+                ID: @{current_username}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     # Navigation menu between pages
     st.markdown("### 🧭 Navigation")
@@ -293,6 +565,9 @@ has_review_result = st.session_state.get("review_result") is not None
 if current_auth_page == "reviewer_priority" and current_role != "reviewer":
     current_auth_page = "results" if has_review_result else "submit"
     st.session_state["auth_page"] = current_auth_page
+
+# Render Environmental Clearance Top Banner
+render_environmental_header(role_display, current_name)
 
 if current_auth_page == "users":
     # --------------------------------------------------------------------------
